@@ -1,0 +1,5 @@
+paths:
+  - src/beer
+fail_under: 100
+exclude: ".*/tests"
+skip_private: true

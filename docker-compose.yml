@@ -1,0 +1,18 @@
+version: "3.9"
+
+services:
+  server:
+    build: .
+    container_name: beer-server
+    command: python -m beer.server
+    environment:
+      - BEER_PORT=5000
+    ports:
+      - "5000:5000"
+
+  client:
+    build: .
+    depends_on:
+      - server
+    command: python -m beer.client --host server --port 5000
+    scale: 1

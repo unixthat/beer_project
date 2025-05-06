@@ -1,0 +1,48 @@
+# Python artefacts ------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.so
+*.pyo
+*.pyd
+
+# Virtual environments / dependencies
+venv/
+.env/
+.dist/
+
+# MyPy & pytest caches
+.mypy_cache/
+.pytest_cache/
+
+# pre-commit downloads
+.cache/
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
+
+# OS-specific cruft
+.DS_Store
+Thumbs.db
+
+# IDE / editor metadata
+.vscode/
+.idea/
+*.sublime*
+
+# Local files
+replay_pkt.bin
+
+# Coverage reports
+htmlcov/
+coverage.xml
+
+# Sonar / analysis artifacts
+.nyc_output/
+
+# Logs
+*.log
+
+# Additional IDEs
+*.code-workspace
