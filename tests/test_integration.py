@@ -12,6 +12,7 @@ from typing import Optional, Type
 from typing_extensions import Literal
 
 import pytest
+from beer.common import unpack, PacketType
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1].joinpath("src")
 
@@ -66,11 +67,16 @@ def test_server_accepts_connection() -> None:
         sock1.settimeout(5)
         sock2.settimeout(5)
 
-        data1 = sock1.recv(32)
-        data2 = sock2.recv(32)
+        f1 = sock1.makefile("rb")
+        f2 = sock2.makefile("rb")
 
-        assert b"START" in data1
-        assert b"START" in data2
+        ptype1, seq1, obj1 = unpack(f1)  # type: ignore[arg-type]
+        ptype2, seq2, obj2 = unpack(f2)  # type: ignore[arg-type]
+
+        assert ptype1 == PacketType.GAME
+        assert ptype2 == PacketType.GAME
+        assert obj1.get("msg", "").startswith("START")
+        assert obj2.get("msg", "").startswith("START")
 
         sock1.close()
         sock2.close()

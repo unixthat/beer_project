@@ -25,38 +25,28 @@ def _print_grid(rows: list[str]) -> None:
 
 
 def _recv_loop(sock: socket.socket) -> None:  # pragma: no cover
-    """Continuously print messages from the server (framed or legacy)."""
+    """Continuously print messages from the server (framed packets only)."""
     br = sock.makefile("rb")  # buffered reader
     try:
         while True:
-            # Peek 2 bytes to guess framing
-            peek = br.peek(2)[:2]
-            if not peek:
-                print("[INFO] Server disconnected.")
+            try:
+                ptype, seq, obj = recv_pkt(br)  # type: ignore[arg-type]
+            except FrameError as exc:
+                print(f"[WARN] Frame error: {exc}.")
                 break
-            if peek == b"\xBE\xEF":  # framed packet
-                try:
-                    ptype, seq, obj = recv_pkt(br)  # type: ignore[arg-type]
-                except FrameError as exc:  # bad frame, resync by discarding line
-                    print(f"[WARN] Frame error: {exc}. Attempting resync.")
-                    br.readline()
-                    continue
+            except Exception:
+                # Socket closed or unreadable – terminate receiver thread.
+                break
 
-                if ptype == PacketType.GAME and isinstance(obj, dict):
-                    if obj.get("type") == "grid":
-                        _print_grid(obj["rows"])
-                    else:
-                        print(obj.get("msg", obj))
-                elif ptype == PacketType.CHAT:
-                    print(f"[CHAT] {obj.get('name')}: {obj.get('msg')}")
+            if ptype == PacketType.GAME and isinstance(obj, dict):
+                if obj.get("type") == "grid":
+                    _print_grid(obj["rows"])
                 else:
-                    print(obj)
-            else:  # legacy line protocol
-                line = br.readline().decode()
-                if not line:
-                    print("[INFO] Server disconnected.")
-                    break
-                print(line.rstrip())
+                    print(obj.get("msg", obj))
+            elif ptype == PacketType.CHAT:
+                print(f"[CHAT] {obj.get('name')}: {obj.get('msg')}")
+            else:
+                print(obj)
     except Exception as exc:  # noqa: BLE001
         print(f"[ERROR] Receiver thread crashed: {exc!r}")
 

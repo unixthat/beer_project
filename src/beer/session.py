@@ -88,48 +88,43 @@ class GameSession(threading.Thread):
         self._event_p2 = threading.Event()
 
     # -------------------- helpers --------------------
-    def _send(self, w: TextIO, msg: str, ptype: PacketType = PacketType.GAME, obj: Any | None = None) -> None:
-        """Send framed packet **and** plain fallback line to writer & spectators."""
-        global_seq = self._seq
-        self._seq += 1
+    def _send(
+        self,
+        w: TextIO,
+        msg: str | None = None,
+        ptype: PacketType = PacketType.GAME,
+        obj: Any | None = None,
+    ) -> None:
+        """Send a framed packet to *w* and mirror it to spectators.
+
+        Legacy plain-text writes have been removed – every participant now
+        receives only the binary Tier-4 frame.  A minimal JSON payload is
+        constructed when *obj* is omitted so the client can still print the
+        human-readable *msg* string.
+        """
         payload = obj if obj is not None else {"msg": msg}
-        # send framed
+        seq = self._seq
+        # Send to primary recipient
         with contextlib.suppress(Exception):
-            send_pkt(w.buffer, ptype, global_seq, payload)  # type: ignore[arg-type]
-        # legacy line
-        w.write(msg + "\n")
-        w.flush()
-        # Mirror to spectators (non-blocking best-effort)
+            send_pkt(w.buffer, ptype, seq, payload)  # type: ignore[arg-type]
+            w.buffer.flush()
+        # Mirror to spectators
         for spec in list(self.spectator_w_files):
             try:
-                spec.write(msg + "\n")
-                spec.flush()
+                send_pkt(spec.buffer, ptype, seq, payload)  # type: ignore[arg-type]
+                spec.buffer.flush()
             except Exception:
-                # Drop broken spectator quietly
                 self.spectator_w_files.remove(spec)
-
-    def _write_grid(self, w: TextIO, board: Board) -> None:
-        """Write ASCII grid to *w* without broadcasting to others."""
-        w.write("GRID\n")
-        w.write("  " + " ".join(str(i + 1).rjust(2) for i in range(board.size)) + "\n")
-        for r in range(board.size):
-            row_label = chr(ord("A") + r)
-            row_str = " ".join(board.display_grid[r][c] for c in range(board.size))
-            w.write(f"{row_label:2} {row_str}\n")
-        w.write("\n")
-        w.flush()
+        self._seq += 1
 
     def _send_grid(self, w: TextIO, board: Board) -> None:
-        self._write_grid(w, board)
-        for spec in list(self.spectator_w_files):
-            try:
-                self._write_grid(spec, board)
-            except Exception:
-                self.spectator_w_files.remove(spec)
-        # send framed variant to attacker as GAME packet
+        """Send the attacker (and spectators) their current view of *board*."""
         grid_payload = {
             "type": "grid",
-            "rows": [" ".join(board.display_grid[r][c] for c in range(board.size)) for r in range(board.size)],
+            "rows": [
+                " ".join(board.display_grid[r][c] for c in range(board.size))
+                for r in range(board.size)
+            ],
         }
         self._send(w, "GRID", PacketType.GAME, grid_payload)
 
@@ -170,20 +165,6 @@ class GameSession(threading.Thread):
                     winner = 2 if current_player == 1 else 1
                     self._conclude(winner, reason="concession")
                     return
-
-                if coord.upper().startswith("CHAT "):
-                    chat_txt = coord[5:].strip()
-                    chat_payload = {"name": f"P{1 if attacker_r is self.p1_file_r else 2}", "msg": chat_txt}
-                    # broadcast chat to all participants
-                    self._send(
-                        self.p1_file_w, f"[CHAT] {chat_payload['name']}: {chat_txt}", PacketType.CHAT, chat_payload
-                    )
-                    self._send(
-                        self.p2_file_w, f"[CHAT] {chat_payload['name']}: {chat_txt}", PacketType.CHAT, chat_payload
-                    )
-                    for spec in list(self.spectator_w_files):
-                        self._send(spec, f"[CHAT] {chat_payload['name']}: {chat_txt}", PacketType.CHAT, chat_payload)
-                    continue  # does not consume turn
 
                 row, col = coord  # tuple[int, int]
                 result, sunk_name = defender_board.fire_at(row, col)
