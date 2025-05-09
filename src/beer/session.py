@@ -42,7 +42,7 @@ import time
 import select
 from typing import TextIO, Any
 
-from .battleship import Board, SHIPS
+from .battleship import Board, SHIPS, parse_coordinate, SHIP_LETTERS
 from .common import PacketType, send_pkt, recv_pkt
 
 COORD_RE = re.compile(r"^[A-J](10|[1-9])$")  # Valid 10×10 coords
@@ -118,15 +118,26 @@ class GameSession(threading.Thread):
                 self.spectator_w_files.remove(spec)
         self._seq += 1
 
-    def _send_grid(self, w: TextIO, board: Board) -> None:
-        """Send the attacker (and spectators) their current view of *board*."""
-        grid_payload = {
-            "type": "grid",
-            "rows": [
-                " ".join(board.display_grid[r][c] for c in range(board.size))
-                for r in range(board.size)
-            ],
-        }
+    def _send_grid(self, w: TextIO, board: Board, *, reveal: bool = False) -> None:
+        """Send a grid view to *w*.
+
+        Args:
+            reveal: If True, ship letters are shown (used during manual placement).
+        """
+        rows = []
+        for r in range(board.size):
+            row_cells = []
+            for c in range(board.size):
+                if reveal:
+                    cell = board.hidden_grid[r][c]
+                    if cell == ".":
+                        cell = "."
+                else:
+                    cell = board.display_grid[r][c]
+                row_cells.append(cell)
+            rows.append(" ".join(row_cells))
+
+        grid_payload = {"type": "grid", "rows": rows}
         self._send(w, "GRID", PacketType.GAME, grid_payload)
 
     # -------------------- gameplay --------------------
@@ -137,6 +148,16 @@ class GameSession(threading.Thread):
             # Inform players of their order – P1 starts, include reconnect token
             self._send(self.p1_file_w, f"START you {self.token_p1}")
             self._send(self.p2_file_w, f"START opp {self.token_p2}")
+
+            # ------------------ optional manual placement -------------------
+            t1 = threading.Thread(target=self._handle_ship_placement, args=(1,))
+            t2 = threading.Thread(target=self._handle_ship_placement, args=(2,))
+            t1.start(); t2.start(); t1.join(); t2.join()
+
+            # After both players are ready, send them their own fleet view once
+            self._send_grid(self.p1_file_w, self.board_p1, reveal=True)
+            self._send_grid(self.p2_file_w, self.board_p2, reveal=True)
+
             current_player = 1
 
             while True:
@@ -188,6 +209,10 @@ class GameSession(threading.Thread):
                 if defender_board.all_ships_sunk():
                     self._conclude(current_player, reason="fleet destroyed")
                     return
+
+                # After each turn send updated own-board views to both players
+                self._send_grid(self.p1_file_w, self.board_p1, reveal=True)
+                self._send_grid(self.p2_file_w, self.board_p2, reveal=True)
 
                 # Next player's turn
                 current_player = 2 if current_player == 1 else 1
@@ -320,3 +345,81 @@ class GameSession(threading.Thread):
             self._event_p2.set()
             return True
         return False
+
+    # ------------------- setup phase --------------------
+    def _handle_ship_placement(self, player_idx: int) -> None:
+        """Interactively ask player whether to place ships manually and handle it."""
+        r, w = self._file_pair(player_idx)
+        opp_w = self.p2_file_w if player_idx == 1 else self.p1_file_w
+
+        # Ask preference (no wait message to opponent)
+        self._send(w, "INFO Manual placement? [Y/n]")
+
+        # Temporarily set small timeout so tests/non-interactive clients proceed automatically
+        sock_pref: socket.socket = r.buffer.raw._sock  # type: ignore[attr-defined]
+        sock_pref.settimeout(30)  # user has half a minute to respond
+        try:
+            choice_line = r.readline()
+        except Exception:
+            choice_line = ""
+        finally:
+            sock_pref.settimeout(None)
+        choice = choice_line.strip().upper() if choice_line else "N"
+
+        if choice and choice.startswith("N"):
+            return  # keep random placement already done in __init__
+
+        # Replace randomly pre-populated board with a fresh empty one
+        new_board = Board()
+        if player_idx == 1:
+            self.board_p1 = new_board
+        else:
+            self.board_p2 = new_board
+        board = new_board
+
+        for ship_name, ship_size in SHIPS:
+            while True:
+                self._send_grid(w, board, reveal=True)
+                self._send(w, f"INFO Place {ship_name} – <coord> [H|V]")
+                try:
+                    line = r.readline()
+                except Exception:
+                    return  # disconnect – handled later
+                if not line:
+                    return
+                parts = line.strip().upper().split()
+                if len(parts) != 2:
+                    self._send(w, "ERR Syntax: e.g. A1 H")
+                    continue
+                coord_str, orient_str = parts
+                if not COORD_RE.match(coord_str):
+                    self._send(w, "ERR Invalid coordinate")
+                    continue
+                row, col = parse_coordinate(coord_str)
+                orientation = 0 if orient_str == "H" else 1 if orient_str == "V" else None
+                if orientation is None:
+                    self._send(w, "ERR Orientation must be H or V")
+                    continue
+                # Try forward placement first; if out-of-bounds try opposite direction automatically
+                if not board.can_place_ship(row, col, ship_size, orientation):
+                    if orientation == 0:  # horizontal – try leftwards
+                        adj_col = col - ship_size + 1
+                        if adj_col >= 0 and board.can_place_ship(row, adj_col, ship_size, orientation):
+                            col = adj_col
+                        else:
+                            self._send(w, "ERR Out-of-bounds or overlap")
+                            continue
+                    else:  # vertical – try upwards
+                        adj_row = row - ship_size + 1
+                        if adj_row >= 0 and board.can_place_ship(adj_row, col, ship_size, orientation):
+                            row = adj_row
+                        else:
+                            self._send(w, "ERR Out-of-bounds or overlap")
+                            continue
+                # Place ship with unique letter
+                board.do_place_ship(row, col, ship_size, orientation, SHIP_LETTERS[ship_name])
+                break  # next ship
+
+        self._send_grid(w, board, reveal=True)
+        self._send(w, "INFO All ships placed – waiting for opponent…")
+

@@ -78,16 +78,24 @@ def test_out_of_turn_shot_results_in_error() -> None:
         assert obj1["msg"].startswith("START")
         assert obj2["msg"].startswith("START")
 
+        # Send 'n' to skip manual placement prompts
+        s1.sendall(b"n\n")
+        s2.sendall(b"n\n")
+
         # Player 2 (defender) shoots out-of-turn
         w2 = s2.makefile("w")
         w2.write("FIRE A1\n")
         w2.flush()
 
-        # Expect immediate ERR on socket 2
-        p_err, _, o_err = unpack(f2)
-        assert p_err == PacketType.GAME
-        assert "ERR" in o_err.get("msg", "")
-        assert "Not your turn" in o_err.get("msg", "")
+        # Expect ERR or placement wait message – loop until we hit ERR Not your turn
+        for _ in range(10):
+            p_err, _, o_err = unpack(f2)
+            assert p_err == PacketType.GAME
+            if "ERR" in o_err.get("msg", ""):
+                assert "Not your turn" in o_err["msg"]
+                break
+        else:
+            pytest.fail("Out-of-turn shot did not yield ERR")
 
         # Now Player 1 performs a valid shot to prove game still lives
         w1 = s1.makefile("w")

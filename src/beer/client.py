@@ -19,9 +19,14 @@ PORT = 5000
 
 def _print_grid(rows: list[str]) -> None:
     print("\n[Board]")
+    columns = len(rows[0].split())
+    header = "   " + " ".join(f"{i:>2}" for i in range(1, columns + 1))
+    print(header)
     for idx, row in enumerate(rows):
         label = chr(ord("A") + idx)
-        print(f"{label:2} {row}")
+        cells = row.split()
+        formatted = " ".join(f"{c:>2}" for c in cells)
+        print(f"{label:2} {formatted}")
 
 
 def _recv_loop(sock: socket.socket) -> None:  # pragma: no cover

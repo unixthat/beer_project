@@ -27,6 +27,14 @@ SHIPS = [
     ("Destroyer", 2),
 ]
 
+# Unique single-char symbols for each ship
+SHIP_LETTERS = {
+    "Carrier": "A",      # Aircraft carrier (avoid clash with Cruiser)
+    "Battleship": "B",
+    "Cruiser": "C",
+    "Submarine": "S",
+    "Destroyer": "D",
+}
 
 class Board:
     """
@@ -68,7 +76,8 @@ class Board:
                 col = random.randint(0, self.size - 1)
 
                 if self.can_place_ship(row, col, ship_size, orientation):
-                    occupied_positions = self.do_place_ship(row, col, ship_size, orientation)
+                    letter = SHIP_LETTERS[ship_name]
+                    occupied_positions = self.do_place_ship(row, col, ship_size, orientation, letter)
                     self.placed_ships.append(
                         {
                             "name": ship_name,
@@ -104,7 +113,8 @@ class Board:
                     continue
 
                 if self.can_place_ship(row, col, ship_size, orientation):
-                    occupied_positions = self.do_place_ship(row, col, ship_size, orientation)
+                    letter = SHIP_LETTERS[ship_name]
+                    occupied_positions = self.do_place_ship(row, col, ship_size, orientation, letter)
                     self.placed_ships.append(
                         {
                             "name": ship_name,
@@ -135,16 +145,16 @@ class Board:
 
     # ... existing code ...
 
-    def do_place_ship(self, row, col, ship_size, orientation):
+    def do_place_ship(self, row, col, ship_size, orientation, letter: str = "S"):
         """Mutating helper that writes ship cells into *hidden_grid* and returns occupied set."""
         occupied = set()
         if orientation == 0:
             for c in range(col, col + ship_size):
-                self.hidden_grid[row][c] = "S"
+                self.hidden_grid[row][c] = letter
                 occupied.add((row, c))
         else:
             for r in range(row, row + ship_size):
-                self.hidden_grid[r][col] = "S"
+                self.hidden_grid[r][col] = letter
                 occupied.add((r, col))
         return occupied
 
@@ -153,7 +163,7 @@ class Board:
     def fire_at(self, row, col):
         """Process a shot at (*row*,*col*) and return (result, sunk_name)."""
         cell = self.hidden_grid[row][col]
-        if cell == "S":
+        if cell not in {".", "o", "X"}:
             self.hidden_grid[row][col] = "X"
             self.display_grid[row][col] = "X"
             if sunk_ship_name := self._mark_hit_and_check_sunk(row, col):
