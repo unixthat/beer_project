@@ -46,3 +46,6 @@ coverage.xml
 
 # Additional IDEs
 *.code-workspace
+
+# Local Documents
+tier_tests.md
