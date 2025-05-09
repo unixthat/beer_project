@@ -9,6 +9,8 @@ services:
       - PYTHONUNBUFFERED=1
     ports:
       - "5000:5000"
+    volumes:
+      - ./src:/app/src:ro
 
   client:
     build: .
@@ -17,4 +19,6 @@ services:
     command: python -m beer.client --host server --port 5000
     stdin_open: true  # keep STDIN open for interactive input
     tty: true         # allocate a pseudo-TTY for nicer prompts
+    volumes:
+      - ./src:/app/src:ro
     # Scale additional clients at runtime via: `docker-compose up --scale client=3`
