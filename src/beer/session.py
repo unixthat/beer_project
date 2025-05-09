@@ -39,6 +39,7 @@ import secrets
 import socket
 import threading
 import time
+import select
 from typing import TextIO, Any
 
 from .battleship import Board, SHIPS
@@ -140,12 +141,16 @@ class GameSession(threading.Thread):
 
             while True:
                 attacker_r, attacker_w, defender_board, defender_name = self._select_players(current_player)
+                # Identify defender streams for out-of-turn monitoring
+                defender_idx = 2 if current_player == 1 else 1
+                defender_r, defender_w = self._file_pair(defender_idx)
+
                 # Send the attacker their current opponent grid view
                 self._send_grid(attacker_w, defender_board)
                 # Request coordinate
                 self._send(attacker_w, "INFO Your turn – FIRE <coord> or QUIT")
 
-                coord = self._receive_coord(attacker_r, attacker_w)
+                coord = self._receive_coord(attacker_r, attacker_w, defender_r, defender_w)
                 if coord is None:  # disconnect → start reconnection timer
                     waiting_token = self.token_p1 if current_player == 1 else self.token_p2
                     waiter_event = self._event_p1 if current_player == 1 else self._event_p2
@@ -203,50 +208,80 @@ class GameSession(threading.Thread):
     def _file_pair(self, player_idx: int):
         return (self.p1_file_r, self.p1_file_w) if player_idx == 1 else (self.p2_file_r, self.p2_file_w)
 
-    def _receive_coord(self, r: TextIO, w: TextIO):
-        """Wait for a valid FIRE command within TURN_TIMEOUT.
+    def _receive_coord(self, r: TextIO, w: TextIO, defender_r: TextIO, defender_w: TextIO):
+        """Wait for a valid FIRE from *r* while tolerating chat/quit from both sides.
+
+        We block up to TURN_TIMEOUT, but also poll *defender_r* so that out-of-turn
+        traffic can be handled immediately (ERR/CHAT/QUIT).  This keeps the game
+        responsive and fixes the earlier bug where a premature FIRE could break
+        framing.
 
         Returns:
-            tuple[int, int]  – parsed coordinate
-            'QUIT'           – player conceded
-            None             – timeout or disconnect
+            tuple[int,int] – coordinate from *r*
+            "QUIT"         – the attacker conceded
+            None           – timeout or disconnect
         """
         start = time.time()
+        att_sock: socket.socket = r.buffer.raw._sock  # type: ignore[attr-defined]
+        def_sock: socket.socket = defender_r.buffer.raw._sock  # type: ignore[attr-defined]
+
         while True:
             remaining = TURN_TIMEOUT - (time.time() - start)
             if remaining <= 0:
                 return None
-            # Temporarily set underlying socket timeout
-            sock: socket.socket = r.buffer.raw._sock  # type: ignore[attr-defined]
-            sock.settimeout(remaining)
-            try:
-                line = r.readline()
-            except socket.timeout:
-                return None
-            except Exception:
-                return None
-            if not line:
-                return None  # disconnect
-            line = line.strip()
-            if line.upper().startswith("CHAT "):
-                chat_txt = line[5:].strip()
-                chat_payload = {"name": f"P{1 if r is self.p1_file_r else 2}", "msg": chat_txt}
-                # broadcast chat to all participants
-                self._send(self.p1_file_w, f"[CHAT] {chat_payload['name']}: {chat_txt}", PacketType.CHAT, chat_payload)
-                self._send(self.p2_file_w, f"[CHAT] {chat_payload['name']}: {chat_txt}", PacketType.CHAT, chat_payload)
-                for spec in list(self.spectator_w_files):
-                    self._send(spec, f"[CHAT] {chat_payload['name']}: {chat_txt}", PacketType.CHAT, chat_payload)
-                continue  # does not consume turn
+            # Wait until either socket has data or timeout expires
+            readable, _, _ = select.select([att_sock, def_sock], [], [], remaining)
+            if not readable:
+                return None  # timeout
 
-            if line.upper() == "QUIT":
-                return "QUIT"
-            if line.upper().startswith("FIRE "):
-                coord_str = line[5:].strip().upper()
-                if COORD_RE.match(coord_str):
-                    row = ord(coord_str[0]) - ord("A")
-                    col = int(coord_str[1:]) - 1
-                    return (row, col)
-            self._send(w, "ERR Syntax: FIRE <A-J1-10> or QUIT")
+            for sock in readable:
+                file = r if sock is att_sock else defender_r
+                line = file.readline()
+                if not line:  # disconnect
+                    return None if sock is att_sock else "DEFENDER_LEFT"
+                line = line.strip()
+                upper = line.upper()
+
+                if sock is def_sock:
+                    # Defender is not on turn
+                    if upper.startswith("CHAT "):
+                        chat_txt = line[5:].strip()
+                        idx = 2 if file is defender_r else 1
+                        chat_payload = {"name": f"P{idx}", "msg": chat_txt}
+                        self._send(self.p1_file_w, f"[CHAT] P{idx}: {chat_txt}", PacketType.CHAT, chat_payload)
+                        self._send(self.p2_file_w, f"[CHAT] P{idx}: {chat_txt}", PacketType.CHAT, chat_payload)
+                        for spec in list(self.spectator_w_files):
+                            self._send(spec, f"[CHAT] P{idx}: {chat_txt}", PacketType.CHAT, chat_payload)
+                        continue
+                    elif upper == "QUIT":
+                        winner = 1 if file is defender_r else 2
+                        self._conclude(winner, reason="concession")
+                        return None
+                    elif upper.startswith("FIRE "):
+                        self._send(defender_w, "ERR Not your turn")
+                        continue  # keep waiting for attacker
+                    else:
+                        self._send(defender_w, "ERR Syntax: FIRE <A-J1-10> or QUIT")
+                        continue
+                else:  # Attacker's own input
+                    if upper.startswith("CHAT "):
+                        chat_txt = line[5:].strip()
+                        idx = 1 if file is self.p1_file_r else 2
+                        chat_payload = {"name": f"P{idx}", "msg": chat_txt}
+                        self._send(self.p1_file_w, f"[CHAT] P{idx}: {chat_txt}", PacketType.CHAT, chat_payload)
+                        self._send(self.p2_file_w, f"[CHAT] P{idx}: {chat_txt}", PacketType.CHAT, chat_payload)
+                        for spec in list(self.spectator_w_files):
+                            self._send(spec, f"[CHAT] P{idx}: {chat_txt}", PacketType.CHAT, chat_payload)
+                        continue
+                    if upper == "QUIT":
+                        return "QUIT"
+                    if upper.startswith("FIRE "):
+                        coord_str = line[5:].strip().upper()
+                        if COORD_RE.match(coord_str):
+                            row = ord(coord_str[0]) - ord('A')
+                            col = int(coord_str[1:]) - 1
+                            return (row, col)
+                        self._send(w, "ERR Syntax: FIRE <A-J1-10> or QUIT")
 
     def _conclude(self, winner: int, *, reason: str) -> None:
         loser = 2 if winner == 1 else 1
