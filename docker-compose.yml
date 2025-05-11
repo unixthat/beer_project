@@ -22,3 +22,11 @@ services:
     volumes:
       - ./src:/app/src:ro
     # Scale additional clients at runtime via: `docker-compose up --scale client=3`
+
+  bot:
+    build: .
+    command: python -m beer.bot --host server
+    depends_on:
+      - server
+    stdin_open: true
+    tty: true

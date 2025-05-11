@@ -10,16 +10,23 @@ import contextlib
 import os
 import socket
 import sys
+import threading
 
 from .session import GameSession, TOKEN_REGISTRY
 from .common import enable_encryption, DEFAULT_KEY
+from .battleship import SHIPS
 
 HOST = os.getenv("BEER_HOST", "127.0.0.1")
 PORT = int(os.getenv("BEER_PORT", "5000"))
 
+# Optional single-ship mode
+ONE_SHIP_LIST = [("Carrier", 5)]
+USE_ONE_SHIP = False
+
 
 def _handle_cli_flags(argv: list[str]) -> None:
     """Parse --secure[=<hex>] and enable encryption if requested."""
+    global USE_ONE_SHIP
     for arg in argv[1:]:
         if arg.startswith("--secure"):
             if "=" in arg:
@@ -29,6 +36,9 @@ def _handle_cli_flags(argv: list[str]) -> None:
                 key = DEFAULT_KEY
             enable_encryption(key)
             print("[INFO] AES-CTR encryption ENABLED")
+        elif arg in {"--one-ship", "--solo"}:
+            USE_ONE_SHIP = True
+            print("[INFO] Running in ONE-SHIP mode (Carrier only)")
 
 
 def main() -> None:  # pragma: no cover – side-effect entrypoint
@@ -81,6 +91,10 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
                     print("[INFO] Added new spectator to ongoing game")
                     continue
 
+                # Clean up finished session if thread ended
+                if current_session and not current_session.is_alive():
+                    current_session = None
+
                 # Otherwise join lobby
                 lobby.append(conn)
 
@@ -88,8 +102,17 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
                     p1 = lobby.pop(0)
                     p2 = lobby.pop(0)
                     print("[INFO] Launching new game session")
-                    current_session = GameSession(p1, p2)
+                    ships_list = ONE_SHIP_LIST if USE_ONE_SHIP else SHIPS
+                    current_session = GameSession(p1, p2, ships=ships_list)
+
+                    def _monitor(sess: GameSession) -> None:
+                        sess.join()
+                        if sess.winner is not None:
+                            print(f"[INFO] Match completed – P{sess.winner} won by {sess.win_reason}.")
+                        print("[INFO] Waiting for new players…")
+
                     current_session.start()
+                    threading.Thread(target=_monitor, args=(current_session,), daemon=True).start()
         except KeyboardInterrupt:
             print("[INFO] Shutting down server (KeyboardInterrupt)")
         finally:

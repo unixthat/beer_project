@@ -46,7 +46,7 @@ from .battleship import Board, SHIPS, parse_coordinate, SHIP_LETTERS
 from .common import PacketType, send_pkt, recv_pkt
 
 COORD_RE = re.compile(r"^[A-J](10|[1-9])$")  # Valid 10×10 coords
-TURN_TIMEOUT = 30  # seconds
+TURN_TIMEOUT = 180  # seconds – extended from 30 s to 3 min
 
 # Global registry mapping reconnect tokens → ongoing GameSession
 TOKEN_REGISTRY: dict[str, "GameSession"] = {}
@@ -55,7 +55,7 @@ TOKEN_REGISTRY: dict[str, "GameSession"] = {}
 class GameSession(threading.Thread):
     """Thread managing a single two-player match."""
 
-    def __init__(self, p1: socket.socket, p2: socket.socket):
+    def __init__(self, p1: socket.socket, p2: socket.socket, *, ships=None):
         """Create a thread that manages a full two-player match.
 
         Args:
@@ -70,11 +70,14 @@ class GameSession(threading.Thread):
         self.p1_file_w: TextIO = p1.makefile("w")
         self.p2_file_r: TextIO = p2.makefile("r")
         self.p2_file_w: TextIO = p2.makefile("w")
+        # Ship roster for this match
+        self.ships = ships if ships is not None else SHIPS
+
         # Each player gets their *own* hidden board.
         self.board_p1 = Board()
         self.board_p2 = Board()
-        self.board_p1.place_ships_randomly(SHIPS)
-        self.board_p2.place_ships_randomly(SHIPS)
+        self.board_p1.place_ships_randomly(self.ships)
+        self.board_p2.place_ships_randomly(self.ships)
         self.spectator_w_files: list[TextIO] = []
         self._lock = threading.Lock()
         self._seq = 0
@@ -87,6 +90,13 @@ class GameSession(threading.Thread):
 
         self._event_p1 = threading.Event()
         self._event_p2 = threading.Event()
+
+        # Out-of-thread result reporting
+        self.winner: int | None = None
+        self.win_reason: str | None = None
+
+        # Shot counters per player
+        self._shots: dict[int, int] = {1: 0, 2: 0}
 
     # -------------------- helpers --------------------
     def _send(
@@ -193,17 +203,60 @@ class GameSession(threading.Thread):
                     return
 
                 row, col = coord  # tuple[int, int]
+                # Peek ship letter before firing to identify which ship was hit (server console only)
+                orig_cell = defender_board.hidden_grid[row][col]
                 result, sunk_name = defender_board.fire_at(row, col)
-                # Notify attacker of outcome
+                coord_txt = self._coord_str(row, col)
+
+                # --- Core protocol messages (retain for bot/tests) ----
                 if result == "hit":
-                    self._send(attacker_w, f"HIT {self._coord_str(row, col)}")
+                    self._send(attacker_w, f"HIT {coord_txt}")
+                    self._send(defender_w, f"HIT {coord_txt}")
                     if sunk_name:
                         self._send(attacker_w, f"SUNK {sunk_name}")
+                        self._send(defender_w, f"SUNK {sunk_name}")
                 elif result == "miss":
-                    self._send(attacker_w, f"MISS {self._coord_str(row, col)}")
+                    self._send(attacker_w, f"MISS {coord_txt}")
+                    self._send(defender_w, f"MISS {coord_txt}")
                 elif result == "already_shot":
-                    self._send(attacker_w, "ERR Already shot there – choose again")
+                    self._send(attacker_w, f"ERR You already fired at {coord_txt} – choose a different coordinate")
                     continue  # repeat turn
+
+                # --- Human-friendly descriptive messages --------------
+                if result == "hit":
+                    attacker_msg = f"YOU HIT at {coord_txt}"
+                    defender_msg = f"OPPONENT HIT your ship at {coord_txt}"
+                    if sunk_name:
+                        attacker_msg = f"YOU SUNK opponent's {sunk_name} at {coord_txt}"
+                        defender_msg = f"OPPONENT SUNK your {sunk_name} at {coord_txt}"
+                    spec_msg = (
+                        f"P{current_player} SUNK P{defender_idx}'s {sunk_name} at {coord_txt}"
+                        if sunk_name
+                        else f"P{current_player} HIT at {coord_txt}"
+                    )
+                else:  # miss
+                    attacker_msg = f"YOU MISSED at {coord_txt}"
+                    defender_msg = f"OPPONENT MISSED at {coord_txt}"
+                    spec_msg = f"P{current_player} MISSED at {coord_txt}"
+
+                self._send(attacker_w, attacker_msg)
+                self._send(defender_w, defender_msg)
+                for spec in list(self.spectator_w_files):
+                    self._send(spec, spec_msg)
+
+                # Compose server-console detail with ship type if hit
+                if result == "hit":
+                    inv = {v: k for k, v in SHIP_LETTERS.items()}
+                    hit_name = inv.get(orig_cell, "Unknown") if orig_cell not in {'.', 'o', 'X'} else "Unknown"
+                    print(f"[GAME] P{current_player} HIT {hit_name} at {coord_txt}")
+                elif result == "miss":
+                    print(f"[GAME] P{current_player} miss at {coord_txt}")
+                if sunk_name:
+                    print(f"[GAME] >>> {sunk_name} sunk by P{current_player}")
+
+                # Count valid shot (hit or miss)
+                if result in {"hit", "miss"}:
+                    self._shots[current_player] += 1
 
                 # Check game-over
                 if defender_board.all_ships_sunk():
@@ -261,7 +314,10 @@ class GameSession(threading.Thread):
 
             for sock in readable:
                 file = r if sock is att_sock else defender_r
-                line = file.readline()
+                try:
+                    line = file.readline()
+                except socket.timeout:
+                    continue  # treat as no data after select glitch
                 if not line:  # disconnect
                     return None if sock is att_sock else "DEFENDER_LEFT"
                 line = line.strip()
@@ -283,10 +339,10 @@ class GameSession(threading.Thread):
                         self._conclude(winner, reason="concession")
                         return None
                     elif upper.startswith("FIRE "):
-                        self._send(defender_w, "ERR Not your turn")
+                        self._send(defender_w, "ERR Not your turn – wait for your turn prompt")
                         continue  # keep waiting for attacker
                     else:
-                        self._send(defender_w, "ERR Syntax: FIRE <A-J1-10> or QUIT")
+                        self._send(defender_w, "ERR Invalid command. Use: FIRE <A-J1-10> or QUIT")
                         continue
                 else:  # Attacker's own input
                     if upper.startswith("CHAT "):
@@ -306,16 +362,23 @@ class GameSession(threading.Thread):
                             row = ord(coord_str[0]) - ord('A')
                             col = int(coord_str[1:]) - 1
                             return (row, col)
-                        self._send(w, "ERR Syntax: FIRE <A-J1-10> or QUIT")
+                        self._send(w, "ERR Invalid coordinate. Example: FIRE B7")
 
     def _conclude(self, winner: int, *, reason: str) -> None:
         loser = 2 if winner == 1 else 1
         win_w = self.p1_file_w if winner == 1 else self.p2_file_w
         lose_w = self.p2_file_w if winner == 1 else self.p1_file_w
+        shots = self._shots.get(winner, 0)
         self._send(win_w, "WIN")
         self._send(lose_w, "LOSE")
-        self._send(win_w, f"INFO Victory by {reason}.")
+        self._send(win_w, f"INFO Victory by {reason} in {shots} shots.")
         self._send(lose_w, f"INFO Defeat by {reason}.")
+
+        # Record result for server logs
+        self.winner = winner
+        self.win_reason = reason
+        self.win_shots = shots  # type: ignore[attr-defined]
+        print(f"[GAME] Match finished – P{winner} wins by {reason} in {shots} shots.")
 
     @staticmethod
     def _coord_str(row: int, col: int) -> str:  # Helper for "HIT B5"
@@ -377,7 +440,7 @@ class GameSession(threading.Thread):
             self.board_p2 = new_board
         board = new_board
 
-        for ship_name, ship_size in SHIPS:
+        for ship_name, ship_size in self.ships:
             while True:
                 self._send_grid(w, board, reveal=True)
                 self._send(w, f"INFO Place {ship_name} – <coord> [H|V]")

@@ -82,7 +82,12 @@ def test_out_of_turn_shot_results_in_error() -> None:
         s1.sendall(b"n\n")
         s2.sendall(b"n\n")
 
-        # Player 2 (defender) shoots out-of-turn
+        # Consume any placement grids/info before first turn starts
+        for _ in range(20):
+            p, _, o = unpack(f1)
+            if isinstance(o, dict) and o.get('msg', '').startswith('INFO Your turn'):
+                break
+        # P2 is defender, send out-of-turn shot
         w2 = s2.makefile("w")
         w2.write("FIRE A1\n")
         w2.flush()

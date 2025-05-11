@@ -135,11 +135,15 @@ class Board:
             for c in range(col, col + ship_size):
                 if self.hidden_grid[row][c] != ".":
                     return False
+                if self._adjacent_has_ship(row, c):
+                    return False
         else:  # Vertical
             if row + ship_size > self.size:
                 return False
             for r in range(row, row + ship_size):
                 if self.hidden_grid[r][col] != ".":
+                    return False
+                if self._adjacent_has_ship(r, col):
                     return False
         return True
 
@@ -204,6 +208,16 @@ class Board:
             row_label = chr(ord("A") + r)
             row_str = " ".join(grid_to_print[r][c] for c in range(self.size))
             print(f"{row_label:2} {row_str}")
+
+    def _occupied(self, r, c):
+        return self.hidden_grid[r][c] != "."
+
+    def _adjacent_has_ship(self, r, c):
+        for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            nr, nc = r + dr, c + dc
+            if 0 <= nr < self.size and 0 <= nc < self.size and self._occupied(nr, nc):
+                return True
+        return False
 
 
 # ... existing code for parse_coordinate and run_single_player* ...

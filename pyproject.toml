@@ -20,6 +20,7 @@ dependencies = []
 [project.scripts]
 beer-server = "beer.server:main"
 beer-client = "beer.client:main"
+beer-bot = "beer.bot:main"
 
 [tool.black]
 line-length = 120
