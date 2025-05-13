@@ -104,10 +104,8 @@ class BotLogic:
         # once closed_low is True only the high side remains, so monotonicity is
         # preserved.
         if self.axis:
-            if not self.frontier:
-                # Regenerate if somehow empty but one end still open
-                if not (self.closed_low and self.closed_high):
-                    self._enqueue_frontier(self.low, self.high)  # type: ignore[arg-type]
+            if not self.frontier and not (self.closed_low and self.closed_high):
+                self._enqueue_frontier(self.low, self.high)  # type: ignore[arg-type]
 
             if self.frontier:
                 # Select square with smallest variable index
