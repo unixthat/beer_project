@@ -234,9 +234,9 @@ class GameSession(threading.Thread):
                     self._conclude(winner, reason="timeout/disconnect")
                     return
                 if coord is None:
-                        winner = 2 if current_player == 1 else 1
-                        self._conclude(winner, reason="timeout/disconnect")
-                        return
+                    winner = 2 if current_player == 1 else 1
+                    self._conclude(winner, reason="timeout/disconnect")
+                    return
 
                 if coord == "QUIT":
                     winner = 2 if current_player == 1 else 1

@@ -181,7 +181,7 @@ class BotLogic:
             # logic takes over, which is required by the Increment-2 live
             # integration test.
             if outcome == "HIT" and self.first_hit is not None and not self.probe_queue:
-                    self._maybe_start_axis(rc)
+                self._maybe_start_axis(rc)
 
             # If we saw an aligned second HIT *before* probes were finished,
             # remember it so we can start the axis later.

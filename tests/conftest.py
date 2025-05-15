@@ -38,6 +38,8 @@ def beer_server(tmp_path):
     """Launch the BEER server as a subprocess on a free port. Yields (proc, port)."""
     port = get_free_port()
     env = os.environ.copy()
+    # Ensure server subprocess imports local code from src
+    env["PYTHONPATH"] = str(PROJECT_ROOT_PATH / "src")
     env["BEER_PORT"] = str(port)
     logfile = tmp_path / "server.log"
     proc = subprocess.Popen([
@@ -76,6 +78,8 @@ def beer_bot_factory(tmp_path):  # tmp_path retained for fixture signature compa
 
     def _launch_bot(port: int, extra_args=None, env_overrides=None, logfile_name=None):
         env = os.environ.copy()
+        # Ensure bot subprocess imports local code
+        env["PYTHONPATH"] = str(PROJECT_ROOT_PATH / "src")
         env["BEER_PORT"] = str(port)
         env["PYTHONUNBUFFERED"] = "1"
         if env_overrides:
