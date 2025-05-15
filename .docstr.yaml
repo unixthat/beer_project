@@ -3,3 +3,19 @@ paths:
 fail_under: 100
 exclude: ".*/tests"
 skip_private: true
+
+# ---
+# Added: Tiered Integration Test Policy (2025-05-15)
+#
+# For every tier and sub-tier (see BEER_Project_Transcription.md, tier_tests.md),
+# there must be a dedicated automated test in tests/tierN/ that launches real client(s)
+# and attaches bots to exercise the required behaviour. Each test must:
+#   - Use actual client/server processes (no mocks)
+#   - Be robust, repeatable, and clean up all resources
+#   - Be CI-compatible (no manual steps)
+#   - Cover all sub-tier requirements (e.g. out-of-order shots, reconnect, lobby, chat, etc.)
+#
+# Directory structure:
+#   tests/tier1/  tests/tier2/  tests/tier3/  tests/tier4/
+#
+# Each sub-tier (e.g. T1.1, T2.3) gets its own test file and, if needed, a custom bot implementation.

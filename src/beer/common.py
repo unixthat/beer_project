@@ -18,7 +18,8 @@ import struct
 import zlib
 from io import BufferedReader, BufferedWriter
 from typing import Any, Final, Tuple
-import os
+
+from . import config as _cfg
 
 try:
     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -33,7 +34,7 @@ HEADER_LEN = _HEADER_STRUCT.size + 4  # +CRC32
 
 _SECRET_KEY: bytes | None = None
 
-DEFAULT_KEY = bytes.fromhex("00112233445566778899AABBCCDDEEFF")  # 128-bit demo key
+DEFAULT_KEY = _cfg.DEFAULT_KEY
 
 
 def enable_encryption(key: bytes) -> None:
@@ -140,11 +141,6 @@ def send_pkt(w: BufferedWriter, ptype: PacketType, seq: int, obj: Any) -> None:
 def recv_pkt(r: BufferedReader):
     """Blocking helper that returns the next `(ptype, seq, obj)` tuple from *r*."""
     return unpack(r)
-
-
-def _get_key_from_env() -> bytes:
-    key_hex = os.getenv("BEER_KEY")
-    return bytes.fromhex(key_hex) if key_hex else DEFAULT_KEY
 
 
 # Public helpers ----------------------------------------------------------------

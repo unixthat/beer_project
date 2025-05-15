@@ -1,168 +1,136 @@
 # BEER – Battleships: Engage in Explosive Rivalry
-CITS 3002 • High‑Distinction Implementation Plan (≤ 2 000 LOC)
+High-Distinction Implementation Plan  (2025-05-16)
 
 ---
 
-## TL;DR (1 paragraph)
+## TL;DR
+A modern Python 3.11 code-base that delivers the full four-tier BEER specification on **< 1 600 LOC** (production).
+Key pillars:
 
-Implement BEER in **Python 3.11** with a `src/beer/` package (server, client, session, common).
-A **thread-per-socket** lobby server continuously matches players, supports **spectators** and a **60 s reconnect window** (Tier 3), all driven by a single **Enum-based FSM**.
-Network I/O uses a custom **16-byte frame + CRC-32** wire protocol (Tier 4.1) implemented in `common.py`; a `/chat <txt>` command is piggy-backed as `PacketType.CHAT` and broadcast to all clients (Tier 4.2).
-Develop in a local **venv** for speed, but ship a multi-arch **Docker** image (`python:3.11-slim`) so the code runs identically on Apple Silicon and x86_64.
-Quality gates: **Black + Flake8 + Mypy (strict) + pytest** via **pre‑commit** and a LOC CI check.
-Everything spins up with one command (`python server.py` **or** `docker compose up`) and stays under ~1 450 production lines.
-
----
-
-## 1 Why Python 3.11 ?
-
-* Concise syntax → stays < 2 000 LOC while covering all tiers.
-* Built‑in `socket`, `threading`, `enum`, `queue`, `zlib.crc32`.
-* Readable for markers; cross‑platform out‑of‑the‑box.
+* **src/beer/** installable package – no legacy top-level scripts.
+* **Central `config.py`** – _all_ env-tunable constants live here.
+* **Event → Packet → UI** messaging pipeline – zero ad-hoc prints; debug toggle via `--debug` / `BEER_DEBUG=1`.
+* **Thread-per-socket** lobby server capable of spectators & reconnect.
+* Quality gates: **Black 24.x + Flake8 7.x + Mypy --strict + pytest 8.x coverage ≥ 90 %**.
+* Multi-arch Docker image (`python:3.11-slim`) for reproducible runs on amd64/arm64.
 
 ---
 
-## 2 Runtime Strategy (venv ↔ Docker)
-
-| Task | venv | Docker |
-|------|------|--------|
-| Day‑to‑day coding | ✅ fastest, IDE friendly | ❌ slower build |
-| Cross‑arch reproducibility | ❌ relies on host | ✅ identical Linux image |
-| Marker convenience | ✅ if Python installed | ✅ one‑command run |
-
-**Hybrid rule**
-1. `python -m venv venv && pip install -r dev-requirements.txt` for dev.
-2. `docker build -t beer .` for guaranteed parity (arm64/amd64).
-Both documented; neither mandatory.
+## 1 Tech Stack
+| Area | Choice | Rationale |
+|------|--------|-----------|
+| Language | Python 3.11 | batteries-included std-lib, type-hints, *threading* |
+| Net Protocol | 16-byte header + JSON payload (+ AES-CTR opt-in) | Tier 4.1 & 4.2 |
+| Concurrency | Thread-per-socket | simple & portable; I/O-bound game |
+| Container | python:3.11-slim multi-arch | identical behaviour on Apple Silicon & x86_64 |
+| Tooling | Black 24.x, Flake8 7.x, Mypy 1.10, Pytest 8.x | enforced via pre-commit & CI |
 
 ---
 
-## 3 Directory Layout
-
+## 2 Directory Layout (current)
 ```
 .
-├── README.md               ← this file
-├── server.py               ← ≈300 LOC
-├── client.py               ← ≈260 LOC
-├── game.py                 ← ≈200 LOC
-├── common.py               ← Packet, CRC‑32, helpers (≈120 LOC)
-├── requirements.txt        ← (empty – std‑lib only)
-├── dev-requirements.txt    ← black, flake8, mypy, pytest, pre-commit
-├── Dockerfile              ← python:3.11‑slim multi‑arch
-├── docker-compose.yml      ← demo: 1 server + 2 clients
-├── .pre-commit-config.yaml ← auto format / lint / type / test
+├── pyproject.toml                 # build metadata
+├── src/beer/
+│   ├── __init__.py               # package export list
+│   ├── config.py                 # **single source of env config**
+│   ├── common.py                 # framing, CRC-32, AES helpers
+│   ├── battleship.py             # rules engine (imports constants from config)
+│   ├── session.py                # GameSession – emits Event objects
+│   ├── server.py                 # lobby, accepts sockets, translates Events → Packets
+│   ├── client.py                 # human CLI (Packet → UI)
+│   ├── bot_logic.py              # parity-hunt AI
+│   └── bot.py                    # network wrapper, `python -m beer.bot`
 └── tests/
-    ├── test_game.py        ← rules unit tests (≈120 LOC)
-    └── test_integration.py ← spin server + 2 sockets (≈150 LOC)
+    ├── tier1/ … tier4/           # tiered integration tests
+    └── unit/                     # pure logic tests
 ```
 
 ---
 
-## 4 Core Design
+## 3 Configuration & Env-Vars
+All runtime knobs are defined once in `src/beer/config.py`.
 
-### 4.1 Enums (common.py)
-```python
-class Ship(Enum):
-    CARRIER=5; BATTLESHIP=4; CRUISER=3; SUBMARINE=3; DESTROYER=2
+| Env Var | Constant | Purpose | Default |
+|---------|----------|---------|---------|
+| `BEER_HOST` | `DEFAULT_HOST` | Server bind / client connect host | 127.0.0.1 |
+| `BEER_PORT` | `DEFAULT_PORT` | TCP port | 5000 |
+| `BEER_TURN_TIMEOUT` | `TURN_TIMEOUT` | Seconds player may idle | 180 |
+| `BEER_PLACE_TIMEOUT` | `PLACEMENT_TIMEOUT` | Manual placement prompt | 30 |
+| `BEER_BOT_DELAY` | `BOT_LOOP_DELAY` | Sleep per bot loop | 0 |
+| `BEER_SERVER_POLL_DELAY` | `SERVER_POLL_DELAY` | Non-turn poll sleep | 0 |
+| `BEER_SIMPLE_BOT` | `SIMPLE_BOT` | Force simple parity AI | 0 |
+| `BEER_KEY` | `DEFAULT_KEY` | AES key (hex) | demo key |
+| `BEER_BOARD_SIZE` | `BOARD_SIZE` | Board dimension | 10 |
+| `BEER_DEBUG` | – | Enable python-logging DEBUG in any component | 0 |
 
-class PacketType(Enum): GAME=0; CHAT=1; ACK=2; ERROR=3
-
-class State(Enum):
-    WAITING=0; PLACING=1; PLAYING=2; DISCONNECTED=3; GAME_OVER=4
-```
-
-### 4.2 State machine (server.py)
-```python
-TRANSITIONS = {
-  (State.PLACING, "place_done"): State.PLAYING,
-  (State.PLAYING, "hit"):        State.PLAYING,
-  (State.PLAYING, "miss"):       State.PLAYING,
-  (State.PLAYING, "win"):        State.GAME_OVER,
-  (State.PLAYING, "disconnect"): State.DISCONNECTED,
-  (State.DISCONNECTED, "rejoin"):State.PLAYING,
-}
-```
-
-### 4.3 Frame format (Tier 4.1)
-```
-0‑1 : 0xBEER  • 2 : ver 1 • 3 : type • 4‑7 : seq u32
-8‑11: len     • 12‑15 : CRC‑32(header[0:12]+payload) • 16‑… JSON
-```
-
-### 4.4 Tier coverage
-| Tier | Files | Feature |
-|------|-------|---------|
-| 1 | server.py, client.py | 2-player, fixed sync |
-| 2 | session.py | validation + 30 s inactivity |
-| 3 | server.py, session.py | lobby queue, spectators, 60 s reconnect |
-| 4.1 | common.py | custom frame + CRC-32 |
-| 4.2 | common.py, session.py, client.py | `/chat` broadcast |
+Guideline: **never** call `os.getenv()` outside `config.py`.
 
 ---
 
-## 5 Tooling & Hooks
+## 4 Messaging Architecture (Tier -HD upgrade)
+```
+Session (game logic)   →  Event(category, subtype, payload)
+Server (transport)     →  PacketType.GAME | CHAT | ERROR
+Client/Bot (UI/AI)     →  print / update / AI decision
+```
+* Each turn produces ≤ 3 Events: `turn.start`, `turn.shot`, `turn.end`.
+* Server subscribes, serialises to framed packets (`common.py.pack`).
+* `--debug` flag enables python-logging of Events on both server & client.
 
-* **Black 24.4** – auto format
-* **Flake8 7.0** – style & lint
-* **Mypy 1.10 --strict** – static types
-* **pytest 8.2** – tests
-* **pre‑commit 3.7** – runs all of the above on every commit
-
-`.pre-commit-config.yaml` already pins exact versions.
+Outcome: deterministic tests, easy spectator / chat tweaks, minimal string duplication.
 
 ---
 
-## 6 Run & Test
+## 5 Road-map Snapshot (concise)
+| ID | Area | Status |
+|----|------|--------|
+| 1-4 | Tier-1 core + features | 🟢 merged |
+| 5 | Graceful shutdown | 🟡 planned |
+| 6 | Reconnect-spectator bug | 🟡 known issue |
+| 7 | Chat robustness | 🟡 verify/fix |
+| 8 | Docs refresh | 🟡 todo |
+| 9 | CI quality gates | 🟡 pipeline work |
+| 10 | Cursor rules | 🟡 polish |
+| 11 | Tiered tests | 🟡 continue filling gaps |
+| 12 | Messaging refactor | 🔴 **current focus** |
 
+---
+
+## 6 Run & Test Cheatsheet
 ```bash
-# dev (plaintext)
-python -m venv venv && source venv/bin/activate
-pip install -r dev-requirements.txt
-python -m beer.server --port 5000         # terminal 1 (server, plaintext)
-python -m beer.client --host 127.0.0.1 --port 5000  # terminal 2 (client A)
-python -m beer.client --host 127.0.0.1 --port 5000  # terminal 3 (client B)
+# Dev
+python -m venv venv && . venv/bin/activate
+pip install -e .[dev]
+python -m beer.server --debug  # server with DEBUG logs
+python -m beer.bot -v          # two bots in separate shells
 
-# dev (encrypted)
-python -m beer.server --port 5001 --secure          # AES-CTR with default demo key
-python -m beer.client --secure --port 5001          # each client opts-in too
-#   custom key example (128-bit hex):
-python -m beer.server --secure=DEAD...C0DE  # 32-char hex
-python -m beer.client --secure=DEAD...C0DE
+# Encrypted demo
+python -m beer.server --secure --port 5001
+python -m beer.client --secure --port 5001
 
-# container demo
-docker compose up --build --scale client=2
+# Docker
+docker compose up --build --scale bot=2
+
+# Tests & quality
+pytest -q
+ython -m black --check .
+flake8 src tests
+mypy --strict src
 ```
 
-*Tests*: `pytest -q` (unit + integration + crypto round-trip).
-*LOC gate*: `cloc $(git ls-files '*.py' | grep -v tests) | awk '/^SUM/ {exit($5>2000)}'`.
+---
+
+## 7 LOC Budget
+Running `cloc $(git ls-files 'src/beer/*.py')` currently reports **≈ 1 350 LOC** – safe margin under 2 000.
 
 ---
 
-## 7 Submission Checklist
-
-- [x] All tiers fully implemented
-- [x] Production LOC < 2 000
-- [x] README (this file) updated with SIDs
-- [x] Demo video ≤ 10 min
-- [x] Zip named `<SID1>_<SID2>_BEER.zip`
-
-Happy ship‑sinking — go bag that HD!
-
----
-
-## 8 Roadmap to HD (Feature Milestones)
-
-We'll progress through the following milestones in order—no fixed calendar, simply complete each step before moving on:
-
-1. **Project boot-strap** – repository, virtual-env, CI pipeline; Black/Flake8/Mypy/pytest are green.
-2. **Tier 1** – two-player network match, fixed turn sequencing, receiver thread in client.
-3. **Tier 2** – input validation, 30 s inactivity timeout, multi-game loop.
-4. **Tier 3 (part 1)** – lobby server, spectators receive live updates.
-5. **Tier 3 (part 2)** – 60 s reconnect window with token; automatic next-match rotation.
-6. **Tier 4.1** – custom 16-byte frame with CRC-32; refactor client/server I/O via `common.py`.
-7. **Tier 4.2** – `/chat` broadcast piggy-backed on the same frame.
-8. **Advanced-knowledge sprint** – add optional AES-CTR encryption & replay-attack mitigation (see §9) plus polish docs & tests.
-9. **Release candidate** – full regression, demo video recording, LOC gate, packaging.
+## 8 Milestones to HD
+1. **Finish Messaging Refactor (ID-12)** <- _in progress_
+2. **Graceful Shutdown** (ID-5)
+3. **Reconnect fix** (ID-6)
+4. Final CI pipeline and docs polish.
 
 ---
 
@@ -230,54 +198,4 @@ This architecture satisfies all Tier 3 rubric points while adding only ~150 LOC.
 | Status | Task |
 |--------|------|
 | ✅ | **Wire `--secure` CLI flag** on both client & server. |
-| ✅ | **Replay-attack proof-of-concept** (`exploit_replay.py`). |
-| ☐ | **Insert actual SIDs** into filenames, README & report before submission. |
-
-Everything else is complete and green; LOC headroom ≈ 450.
-
----
-
-## 13 Architecture Overview (at a glance)
-
-A concise picture of how the **server, client and wire-protocol** collaborate; distilled from the longer narrative in *deliverable.md*.
-
-### 13.1 Server responsibilities
-* **Connection intake** – accept TCP sockets, classify (player, spectator, reconnect) and dispatch.
-* **Authoritative game state** – owns the boards, validates every move, prevents cheating.
-* **GameSession FSM** – one thread per match governs turn order, time-outs (30 s inactivity) and win detection.
-* **Concurrency** – simple *thread-per-socket*; Python GIL is no bottleneck because gameplay is I/O-bound.
-* **Error handling** – disconnect ⇒ opponent wins by forfeit; malformed frame ⇒ `PacketType.ERROR`.
-
-### 13.2 Client responsibilities
-* Human-facing CLI: render two ASCII grids, parse `/chat` and standard commands.
-* Maintain *local* view only – trusts every ruling from the server.
-* Background receiver thread decodes framed or legacy lines and updates the UI in real time.
-
-### 13.3 Communication protocol
-* Default line-oriented legacy messages for backward compatibility.
-* Tier 4 adds a 16-byte header + JSON payload (`common.py`).
-* Optional AES-CTR encrypts *payload bytes* only; header (incl. CRC-32) stays clear-text.
-
-### 13.4 Determinism & testing
-* Strict turn-prompting guarantees only one legal action at any time → reproducible runs.
-* Unit tests cover rules; integration tests spin an actual server & two sockets under `pytest`.
-
----
-
-## 14 Lines-of-Code Budget & Minimisation Tactics
-
-Staying below **2 000 production LOC** is a hard rubric gate. Current count ≈ 1 450. Key tactics:
-
-| Principle | Example |
-|-----------|---------|
-| **DRY** – no duplication | `common.parse_coord()` reused by server & client |
-| **Pythonic primitives** | `all(ship.sunk for ship in ships)` replaces verbose loops |
-| **Std-lib first** | `queue.Queue`, `enum.Enum`, `threading` keep deps light |
-| **Focused helpers** | `broadcast_result()` centralises dual-socket messaging |
-| **Lean protocol** | Text + tiny JSON → no heavyweight serializers |
-| **Essential comments only** | Deep explanations live in this README, not inline |
-| **Early testing** | Prevents last-minute patch-bloat |
-
-With these guardrails we have ~ 500 LOC headroom for the remaining secure-flag work and any bug-fixes.
-
----
+| ✅ | **Replay-attack proof-of-concept** (`

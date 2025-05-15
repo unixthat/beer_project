@@ -1,244 +1,301 @@
+"""Automated Battleship bot (CLI entry-point).
+
+This implementation intentionally *reuses* as much rendering / packet handling
+logic from the interactive client so the two stay in sync.  The only
+behavioural difference is that the bot automatically chooses and fires a shot
+at every turn using `beer.bot_logic.BotLogic` (or the simpler parity bot if
+`BEER_SIMPLE_BOT=1` is exported).
+"""
+
 from __future__ import annotations
 
-"""
-Very simple BEER bot that fires at random coordinates until the game ends.
-
-This rewrite keeps the public API, network handling and CLI exactly the same.
-The *only* changes are inside the shooting logic:
-
-1. **Parity hunting** – random shots are restricted to one colour of a
-   checkerboard until only length-1 ships remain.
-2. **Robust target mode**
-   • After the second hit establishes an axis, any further hit in the same row
-     (horizontal) or column (vertical) is added to the cluster, even across
-     gaps.
-   • A **frontier queue** stores exactly the two squares at each end of the
-     cluster; once we fire at a square it is popped so we never re-fire there.
-3. **Halo exclusion** – when a ship is sunk, all orthogonally-adjacent squares
-   are marked as blocked so the hunt phase never wastes shots next to dead
-   hulls.
-4. **Clean end-of-game reset** – _awaiting_result is cleared on WIN/LOSE to
-   avoid a rare hang if the last reply is not "SUNK".
-"""
-
 import argparse
-import contextlib
-import random
+import logging
+import os
 import socket
 import threading
-import time
-import os
-from typing import Optional, Tuple
-import numpy as np
+from typing import Callable, Dict, Optional
 
-from .common import DEFAULT_KEY, FrameError, PacketType, enable_encryption, recv_pkt
-from .bot_logic import BotLogic, Coord
-# Optional RL policy – imported lazily to avoid heavy deps during test runs
-try:
-    from .ppo_bot import next_shot as ppo_next_shot, load as ppo_load
-except Exception:  # pragma: no cover – SB3 stack likely missing in CI
-    ppo_next_shot = None  # type: ignore
-    ppo_load = None  # type: ignore
-from .client import _print_dual_grid, _is_reveal_grid
+from . import config as _cfg
+from .bot_logic import BotLogic  # selection logic obeys BEER_SIMPLE_BOT
+from .common import (
+    FrameError,
+    IncompleteError,
+    PacketType,
+    recv_pkt,
+    enable_encryption,
+    DEFAULT_KEY,
+)
+# Re-use helper renderers from the interactive client
+from .client import _print_two_grids, _is_reveal_grid
 
-HOST = "127.0.0.1"
-PORT = 5000
+HOST = _cfg.DEFAULT_HOST
+PORT = _cfg.DEFAULT_PORT
+
+# ------------- module-level logger -------------
+logging.basicConfig(
+    level=logging.DEBUG if _cfg.DEBUG else logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+# ---------------- internal utils -----------------
 
 
-class BotPlayer:
-    """Thin network wrapper around the strategy engine in bot_logic.BotLogic."""
+class _BotState:
+    """Lightweight container tracking the bot's own game state."""
 
-    def __init__(self, verbose_level: int = 0, *, ppo_model: str | None = None) -> None:
-        self.verbose_level = verbose_level
-        self.running = True
-
-        # ---------------- Strategy engines ----------------
-        # 1. Classic deterministic heuristic (default for unit-tests)
-        self.logic = BotLogic()
-        # 2. Optional PPO – activated when *ppo_model* is supplied and sb3 stack available.
-        self._ppo_model_path: str | None = ppo_model or os.getenv("BEER_PPO_MODEL")
-        self._ppo_ready = False
-        if self._ppo_model_path:
-            if ppo_load is None:
-                raise RuntimeError(
-                    "PPO model requested but stable-baselines3 / gym not installed; "
-                    "run `pip install stable-baselines3 gymnasium gym-battleship sb3-contrib`"
-                )
-            try:
-                ppo_load(self._ppo_model_path, masked=True)
-                self._ppo_ready = True
-            except Exception as exc:
-                raise RuntimeError(f"Failed to load PPO model {self._ppo_model_path}: {exc}") from exc
-
-        # Networking
-        self.sock: Optional[socket.socket] = None
-        self.wfile = None
-
-        # Last shot awaiting result
-        self.last_shot: Optional[Coord] = None
+    def __init__(self, logic: BotLogic, wfile):
+        self.logic = logic
+        self.wfile = wfile  # TextIO – writes plain protocol lines
         self.awaiting_result = False
+        self.last_shot: Optional[str] = None  # coordinate string eg "B7"
 
-        # For verbose grid display
-        self._last_opp_rows: list[str] | None = None
-        self._last_own_rows: list[str] | None = None
-
-    # --------------------------------------------------------------------- #
-    # Utilities
-    # --------------------------------------------------------------------- #
+    # --- helpers ------------------------------------------------------
     @staticmethod
-    def _coord_to_str(rc: Coord) -> str:
+    def _coord_to_str(rc):
         r, c = rc
         return f"{chr(ord('A') + r)}{c + 1}"
 
-    # ------------------------------------------------------------------ #
-    # Network / game loop
-    # ------------------------------------------------------------------ #
-    def _receiver(self, sock: socket.socket) -> None:
-        br = sock.makefile("rb")
+    def fire(self):
+        """Choose next coordinate, send FIRE command, mark awaiting_result."""
+        rc = self.logic.choose_shot()
+        coord_txt = self._coord_to_str(rc)
         try:
-            while self.running:
+            self.wfile.write(f"FIRE {coord_txt}\n")
+            self.wfile.flush()
+            # Emit a simple line for tests / log grepping
+            print(f"SHOT {coord_txt}", flush=True)
+            logger.debug("Fired at %s", coord_txt)
+            self.awaiting_result = True
+            self.last_shot = coord_txt
+        except Exception as exc:
+            logger.error("Failed to write FIRE command: %s", exc)
+
+    def handle_result_line(self, msg: str):
+        """Update BotLogic with the outcome of its previous shot."""
+        if not self.awaiting_result or not self.last_shot:
+            return
+        outcome = None
+        if "HIT" in msg:
+            outcome = "HIT"
+        elif "MISS" in msg:
+            outcome = "MISS"
+        elif "SUNK" in msg:
+            outcome = "HIT"  # treat SUNK as HIT for logic purposes
+        if outcome:
+            rc = self._str_to_coord(self.last_shot)
+            self.logic.register_result(outcome, rc)
+            self.awaiting_result = False
+
+    @staticmethod
+    def _str_to_coord(coord: str):
+        row = ord(coord[0]) - ord("A")
+        col = int(coord[1:]) - 1
+        return (row, col)
+
+
+# ---------------- receiver thread -----------------
+
+class BotReceiver(threading.Thread):
+    """Background thread that listens to framed packets and updates the bot state.
+
+    The previous implementation used one large nested function with several
+    `def` blocks inside – this class-based refactor flattens the control-flow
+    and exposes every handler as a *method* instead.  This is considerably
+    easier to read, understand and unit-test.
+    """
+
+    def __init__(self, sock: socket.socket, state: _BotState, stop_evt: threading.Event, verbose: int):
+        super().__init__(daemon=True)
+        self._sock = sock
+        self._state = state
+        self._stop_evt = stop_evt
+        self._verbose = verbose
+        # Determine this bot's role: will be set on START raw message
+        self._my_index: Optional[int] = None
+
+        # Convenience wrappers
+        self._br = sock.makefile("rb")
+
+        # Board caches for pretty printing
+        self._last_own: Optional[list[str]] = None
+        self._last_opp: Optional[list[str]] = None
+
+        # Map structured GAME → handler method
+        self._handlers: Dict[str, Callable[[dict], None]] = {
+            "spec_grid": self._on_spec_grid,
+            "grid": self._on_grid,
+            "chat": self._on_chat,  # rarely used (raw chat frame)
+            "end": self._on_end,
+        }
+
+    # ---------------------------------------------------------------------
+    # Helper handler methods – each consumes a *structured* GAME payload.
+    # ---------------------------------------------------------------------
+
+    def _on_spec_grid(self, obj: dict) -> None:
+        if self._verbose < 2 or "spec_grid" in _cfg.QUIET_CATEGORIES:
+            return
+        _print_two_grids(
+            obj.get("rows_p1", []),
+            obj.get("rows_p2", []),
+            header_left="Player 1",
+            header_right="Player 2",
+        )
+
+    def _on_grid(self, obj: dict) -> None:
+        rows = obj["rows"]
+        if _is_reveal_grid(rows):
+            self._last_own = rows
+            return
+        self._last_opp = rows
+        if self._verbose >= 0 and self._last_own and "grid" not in _cfg.QUIET_CATEGORIES:
+            _print_two_grids(self._last_opp, self._last_own, header_left="Opp Fleet", header_right="Your Fleet")
+
+    def _on_chat(self, obj: dict) -> None:
+        if "chat" in _cfg.QUIET_CATEGORIES or self._verbose < 0:
+            return
+        print(f"[CHAT] {obj.get('name')}: {obj.get('msg')}")
+
+    def _on_end(self, obj: dict) -> None:
+        winner = obj.get("winner")
+        shots = obj.get("shots")
+        # Print result from this bot's perspective
+        if getattr(self, '_my_index', None) == winner:
+            print("WIN")
+        else:
+            print("LOSE")
+        print(f"Game finished in {shots} shots")
+        self._stop_evt.set()
+
+    # ------------------------------------------------------------------
+    # Core loop
+    # ------------------------------------------------------------------
+
+    def run(self) -> None:  # noqa: C901 – complex but contained
+        try:
+            while not self._stop_evt.is_set():
                 try:
-                    ptype, _seq, obj = recv_pkt(br)  # type: ignore[arg-type]
-                except FrameError:
+                    ptype, _seq, obj = recv_pkt(self._br)  # type: ignore[arg-type]
+                except IncompleteError:
+                    self._stop_evt.set()
                     break
-                except Exception as exc:
-                    if self.verbose_level >= 1:
-                        print("[BOT-ERR]", exc)
+                except FrameError as exc:
+                    logger.error("Frame error encountered: %s", exc)
+                    self._stop_evt.set()
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("Unexpected exception in recv loop: %s", exc)
+                    self._stop_evt.set()
                     break
 
-                if ptype != PacketType.GAME:
+                # Structured CHAT frames
+                if ptype == PacketType.CHAT and isinstance(obj, dict):
+                    self._on_chat(obj)
                     continue
 
-                # ---------------- Grid packets ----------------
-                if isinstance(obj, dict) and obj.get("type") == "grid":
-                    rows = obj["rows"]
-                    if _is_reveal_grid(rows):
-                        self._last_own_rows = rows
-                    else:
-                        self._last_opp_rows = rows
-                        if self.verbose_level >= 2 and self._last_own_rows:
-                            _print_dual_grid(self._last_opp_rows, self._last_own_rows)
+                # Ignore non-GAME payloads (keep-alive etc.)
+                if ptype != PacketType.GAME or not isinstance(obj, dict):
                     continue
 
-                msg = obj.get("msg", "") if isinstance(obj, dict) else ""
-                upper = msg.upper()
-
-                # Auto-accept default placement
-                if msg.startswith("INFO Manual placement"):
-                    if self.wfile:
-                        self.wfile.write("n\n"), self.wfile.flush()
+                # Structured GAME sub-type
+                kind = obj.get("type")
+                if kind in self._handlers:
+                    self._handlers[kind](obj)
                     continue
 
-                # Handle outcome of the previous shot
-                if self.awaiting_result and self.last_shot:
-                    coord = self.last_shot
-                    if upper.startswith("HIT"):
-                        if self.verbose_level == 1:
-                            print(msg)
-                        self.logic.register_result("HIT", coord)
-                        self.awaiting_result = False
-                    elif upper.startswith("MISS") or "MISS" in upper:
-                        if self.verbose_level == 1:
-                            print(msg)
-                        self.logic.register_result("MISS", coord)
-                        self.awaiting_result = False
-                    elif upper.startswith("SUNK") or "SUNK" in upper:
-                        if self.verbose_level == 1:
-                            print(msg)
-                        self.logic.register_result("SUNK", coord)
-                        self.awaiting_result = False
-                    elif "ERR" in upper or "INVALID" in upper:
-                        self.awaiting_result = False
-
-                # Extra SUNK line outside awaiting state (our partner sunk by previous HIT)
-                if upper.startswith("SUNK"):
-                    if self.verbose_level == 1:
-                        print(msg)
-                    self.logic.register_result("SUNK", (-1, -1))
+                # Legacy raw message fallback
+                msg: str = obj.get("msg", "")
+                if not msg:
                     continue
 
-                # Decide to shoot
-                if "YOUR TURN" in upper:
-                    if self._ppo_ready and ppo_next_shot is not None:
-                        # Construct 100-element fired mask (row-major)
-                        obs = np.zeros((2, 10, 10), dtype=np.float32)
-                        for (r, c) in self.logic.shots_taken:
-                            obs[1, r, c] = 1.0
-                        r, c = ppo_next_shot(obs)
-                        # Avoid accidental refire into an already-shot cell
-                        # (should be prevented by action mask but be safe)
-                        if (r, c) in self.logic.shots_taken:
-                            # fall back to heuristic
-                            r, c = self.logic.choose_shot()
-                    else:
-                        r, c = self.logic.choose_shot()
-                    coord = self._coord_to_str((r, c))
-                    if self.wfile:
-                        self.wfile.write(f"FIRE {coord}\n"), self.wfile.flush()
-                    self.logic.shots_taken.add((r, c))
-                    self.last_shot = (r, c)
-                    self.awaiting_result = True
-                    if self.verbose_level == 1:
-                        print(f"SHOT {coord}")
-                    continue
+                self._handle_raw_message(msg)
+        finally:  # Always clean up
+            self._stop_evt.set()
+            logger.info("Receiver stopped, cleaning up resources.")
 
-                # End-of-game human-readable messages are printed as-is in high verbose
-                if upper.startswith(("WIN", "LOSE", "INFO")) and self.verbose_level >= 2:
-                    print(msg)
+    # ------------------------------------------------------------------
+    # Raw message fall-through helpers
+    # ------------------------------------------------------------------
 
-                if upper.startswith(("WIN", "LOSE")):
-                    self.awaiting_result = False
-                    self.running = False
-                    break
-        finally:
-            self.running = False
+    def _handle_raw_message(self, msg: str) -> None:
+        """Deal with old-style string messages – bots depend on these."""
+        # Capture this bot's player index from START message
+        if msg.startswith("START you"):
+            self._my_index = 1
+            return
+        if msg.startswith("START opp"):
+            self._my_index = 2
+            return
+        # Human-readable echo (respect verbosity)
+        if self._verbose >= 0 and (msg.startswith("YOU ") or msg.startswith("OPPONENT ")):
+            print(msg)
+        elif self._verbose >= 1 and "raw" not in _cfg.QUIET_CATEGORIES:
+            print(msg)
 
-    # ------------------------------------------------------------------ #
-    # Runner
-    # ------------------------------------------------------------------ #
-    def run(self, host: str, port: int) -> None:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.connect((host, port))
-            self.sock = s
-            self.wfile = s.makefile("w")
-
-            recv_thr = threading.Thread(
-                target=self._receiver, args=(s,), daemon=True
-            )
-            recv_thr.start()
-
-            try:
-                while self.running and recv_thr.is_alive():
-                    time.sleep(0.1)
-            except KeyboardInterrupt:
-                if self.verbose_level >= 1:
-                    print("\n[BOT] Interrupted – shutting down…")
-                self.running = False
-                with contextlib.suppress(Exception):
-                    if self.wfile:
-                        self.wfile.write("QUIT\n"), self.wfile.flush()
-                time.sleep(0.2)
+        # Auto responses
+        if msg.startswith("INFO Manual placement?"):
+            self._state.wfile.write("n\n")
+            self._state.wfile.flush()
+            return
+        if msg.startswith("INFO Your turn"):
+            self._state.fire()
+            return
+        if msg.startswith("YOU "):
+            self._state.handle_result_line(msg)
 
 
-# ------------------------------------------------------------------ #
-# CLI entry-point
-# ------------------------------------------------------------------ #
+# -------------------------- main ----------------------------
+
 def main() -> None:  # pragma: no cover
-    parser = argparse.ArgumentParser(description="Very simple BEER auto-play bot")
+    parser = argparse.ArgumentParser(description="Automated BEER Battleship bot")
     parser.add_argument("--host", default=HOST)
     parser.add_argument("--port", type=int, default=PORT)
-    parser.add_argument("--secure", nargs="?", const="default")
-    parser.add_argument("--ppo-model", help="Path to a Stable-Baselines3 PPO model to drive the bot instead of heuristics")
-    parser.add_argument("-v", "--verbose", action="count", default=0, help="-v: log shots, -vv: full verbose with boards")
+    parser.add_argument("--seed", type=int, default=None, help="Random seed for deterministic play")
+    parser.add_argument("--secure", nargs="?", const="default", help="Enable AES-CTR encryption optionally with hex key")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument("-v", "--verbose", action="count", default=0, help="Increase verbosity (stackable)")
+    parser.add_argument("-q", "--quiet", action="store_true", help="Suppress all stdout except final result")
     args = parser.parse_args()
+
+    if args.debug:
+        os.environ["BEER_DEBUG"] = "1"
+
+    # Effective verbosity: quiet => -1, else count of -v (0/1/2)
+    verbose = -1 if args.quiet else args.verbose
 
     if args.secure is not None:
         key = DEFAULT_KEY if args.secure == "default" else bytes.fromhex(args.secure)
         enable_encryption(key)
-        print("[BOT] Encryption enabled")
+        if verbose >= 0:
+            print("[INFO] Encryption enabled in bot")
 
-    BotPlayer(verbose_level=args.verbose, ppo_model=args.ppo_model).run(args.host, args.port)
+    logic = BotLogic(seed=args.seed)
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.connect((args.host, args.port))
+        wfile = s.makefile("w")
+        state = _BotState(logic, wfile)
+
+        stop_evt = threading.Event()
+        receiver = BotReceiver(s, state, stop_evt, verbose)
+        receiver.start()
+
+        # The bot has no stdin loop – all work is event-driven in receiver.
+        # Block main thread until receiver requests shutdown.
+        try:
+            while not stop_evt.is_set():
+                receiver.join(timeout=0.5)
+        except KeyboardInterrupt:
+            logger.info("Bot interrupted by user – quitting")
+        finally:
+            stop_evt.set()
+            try:
+                s.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     main()

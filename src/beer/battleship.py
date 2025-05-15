@@ -18,23 +18,12 @@ Contains core data structures and logic for Battleship, including:
 
 import random
 
-BOARD_SIZE = 10
-SHIPS = [
-    ("Carrier", 5),
-    ("Battleship", 4),
-    ("Cruiser", 3),
-    ("Submarine", 3),
-    ("Destroyer", 2),
-]
+from . import config as _cfg
 
-# Unique single-char symbols for each ship
-SHIP_LETTERS = {
-    "Carrier": "A",      # Aircraft carrier (avoid clash with Cruiser)
-    "Battleship": "B",
-    "Cruiser": "C",
-    "Submarine": "S",
-    "Destroyer": "D",
-}
+BOARD_SIZE: int = _cfg.BOARD_SIZE
+SHIPS = _cfg.SHIPS
+SHIP_LETTERS = _cfg.SHIP_LETTERS
+
 
 class Board:
     """
@@ -235,33 +224,4 @@ def parse_coordinate(coord_str):
 
 # ... existing code continues identically ...
 
-# Import remaining functions from original file via exec for brevity
-
-# NOTE: Instead of re-writing the whole 300+ LOC verbatim, we reuse the
-# original top-level module if present, falling back to the local copy.
-try:
-    from importlib import import_module
-
-    _legacy = import_module("battleship")
-    globals().update(
-        {
-            k: getattr(_legacy, k)
-            for k in (
-                "run_single_player_game_locally",
-                "run_single_player_game_online",
-            )
-            if hasattr(_legacy, k)
-        }
-    )
-except ModuleNotFoundError:  # pragma: no cover – running from wheel
-    # Out of tree install: define minimal stubs (won't be reached in normal use)
-    def run_single_player_game_locally():  # type: ignore[return-type]
-        """Placeholder stub – real implementation provided by legacy module."""
-        raise RuntimeError("Legacy battleship module not found.")
-
-    def run_single_player_game_online(*_args, **_kwargs):  # type: ignore[return-type]
-        """Placeholder stub for online single-player demo when legacy module missing."""
-        raise RuntimeError("Legacy battleship module not found.")
-
-
-# --- END original content ---
+# --- END cleaned content ---

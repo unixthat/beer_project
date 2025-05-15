@@ -40,13 +40,15 @@ import socket
 import threading
 import time
 import select
-from typing import TextIO, Any
+from typing import TextIO, Any, Callable, List
 
 from .battleship import Board, SHIPS, parse_coordinate, SHIP_LETTERS
 from .common import PacketType, send_pkt, recv_pkt
+from . import config as _cfg
+from .events import Event, Category
 
 COORD_RE = re.compile(r"^[A-J](10|[1-9])$")  # Valid 10×10 coords
-TURN_TIMEOUT = 180  # seconds – extended from 30 s to 3 min
+TURN_TIMEOUT = _cfg.TURN_TIMEOUT  # seconds
 
 # Global registry mapping reconnect tokens → ongoing GameSession
 TOKEN_REGISTRY: dict[str, "GameSession"] = {}
@@ -55,7 +57,7 @@ TOKEN_REGISTRY: dict[str, "GameSession"] = {}
 class GameSession(threading.Thread):
     """Thread managing a single two-player match."""
 
-    def __init__(self, p1: socket.socket, p2: socket.socket, *, ships=None):
+    def __init__(self, p1: socket.socket, p2: socket.socket, *, ships=None, session_ready=None):
         """Create a thread that manages a full two-player match.
 
         Args:
@@ -66,19 +68,31 @@ class GameSession(threading.Thread):
         super().__init__(daemon=True)
         self.p1_sock = p1
         self.p2_sock = p2
+        # Enable TCP keepalive to detect disconnects promptly
+        try:
+            self.p1_sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            self.p2_sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        except Exception:
+            pass  # Not all platforms support this, but try
         self.p1_file_r: TextIO = p1.makefile("r")
         self.p1_file_w: TextIO = p1.makefile("w")
         self.p2_file_r: TextIO = p2.makefile("r")
         self.p2_file_w: TextIO = p2.makefile("w")
         # Ship roster for this match
         self.ships = ships if ships is not None else SHIPS
+        self.session_ready = session_ready
 
         # Each player gets their *own* hidden board.
         self.board_p1 = Board()
         self.board_p2 = Board()
         self.board_p1.place_ships_randomly(self.ships)
         self.board_p2.place_ships_randomly(self.ships)
+        # Registered spectator output streams (read-only clients)
         self.spectator_w_files: list[TextIO] = []
+        # Every *half-turn* (i.e. after each individual shot) we increment
+        # this counter; spectators receive a full dual-board update after
+        # every *two* shots (both players have acted).
+        self._half_turn_counter: int = 0
         self._lock = threading.Lock()
         self._seq = 0
 
@@ -98,6 +112,12 @@ class GameSession(threading.Thread):
         # Shot counters per player
         self._shots: dict[int, int] = {1: 0, 2: 0}
 
+        # Event subscribers
+        self._subs: List[Callable[[Event], None]] = []
+
+        # Added for the new run method
+        self._line_buffer: dict[int, str] = {}
+
     # -------------------- helpers --------------------
     def _send(
         self,
@@ -105,30 +125,29 @@ class GameSession(threading.Thread):
         msg: str | None = None,
         ptype: PacketType = PacketType.GAME,
         obj: Any | None = None,
-    ) -> None:
-        """Send a framed packet to *w* and mirror it to spectators.
+        *,
+        mirror_spec: bool = False,
+    ) -> bool:
+        """Low-level helper that frames *payload* and writes it to *w*.
 
-        Legacy plain-text writes have been removed – every participant now
-        receives only the binary Tier-4 frame.  A minimal JSON payload is
-        constructed when *obj* is omitted so the client can still print the
-        human-readable *msg* string.
+        Unlike the old implementation, **no automatic mirroring** to spectators
+        happens here.  All spectator communication is funnelled through the
+        dedicated `_send_spec_update()` helper so that we maintain *exactly*
+        the information we want to expose.
         """
         payload = obj if obj is not None else {"msg": msg}
         seq = self._seq
-        # Send to primary recipient
-        with contextlib.suppress(Exception):
+        try:
             send_pkt(w.buffer, ptype, seq, payload)  # type: ignore[arg-type]
             w.buffer.flush()
-        # Mirror to spectators
-        for spec in list(self.spectator_w_files):
-            try:
-                send_pkt(spec.buffer, ptype, seq, payload)  # type: ignore[arg-type]
-                spec.buffer.flush()
-            except Exception:
-                self.spectator_w_files.remove(spec)
+        except Exception:
+            return False
+        # Spectator mirroring is now *explicit* via `_send_spec_update()` –
+        # ignore the legacy `mirror_spec` flag (kept for call-site compatibility).
         self._seq += 1
+        return True
 
-    def _send_grid(self, w: TextIO, board: Board, *, reveal: bool = False) -> None:
+    def _send_grid(self, w: TextIO, board: Board, *, reveal: bool = False) -> bool:
         """Send a grid view to *w*.
 
         Args:
@@ -148,29 +167,56 @@ class GameSession(threading.Thread):
             rows.append(" ".join(row_cells))
 
         grid_payload = {"type": "grid", "rows": rows}
-        self._send(w, "GRID", PacketType.GAME, grid_payload)
+        return self._send(w, "GRID", PacketType.GAME, grid_payload)
 
     # -------------------- gameplay --------------------
     def run(self) -> None:  # noqa: C901 complexity – fine for server thread
         """Main game-loop executed in its own thread until the match ends."""
         # sourcery skip: low-code-quality
         try:
+            if self.session_ready:
+                self.session_ready.set()  # Signal ready for spectators
+
             # Inform players of their order – P1 starts, include reconnect token
+            self._emit(Event(Category.TURN, "start", {"token_p1": self.token_p1, "token_p2": self.token_p2}))
+            # Legacy START frames (maintain compatibility during migration)
             self._send(self.p1_file_w, f"START you {self.token_p1}")
             self._send(self.p2_file_w, f"START opp {self.token_p2}")
 
             # ------------------ optional manual placement -------------------
             t1 = threading.Thread(target=self._handle_ship_placement, args=(1,))
             t2 = threading.Thread(target=self._handle_ship_placement, args=(2,))
-            t1.start(); t2.start(); t1.join(); t2.join()
+            t1.start()
+            t2.start()
+            t1.join()
+            t2.join()
 
-            # After both players are ready, send them their own fleet view once
+            # Initial own-fleet views to each player
             self._send_grid(self.p1_file_w, self.board_p1, reveal=True)
             self._send_grid(self.p2_file_w, self.board_p2, reveal=True)
+
+            # Initial spectator snapshot (shot #0)
+            self._send_spec_update()
 
             current_player = 1
 
             while True:
+                # Poll both sockets for disconnect before each turn
+                for idx, (r, w) in enumerate([(self.p1_file_r, self.p1_file_w), (self.p2_file_r, self.p2_file_w)], start=1):
+                    sock = r.buffer.raw._sock
+                    readable, _, _ = select.select([sock], [], [], 0)
+                    if readable:
+                        line = r.readline()
+                        if not line:
+                            print(f"[DEBUG] run: disconnect detected on player {idx} before turn")
+                            winner = 2 if idx == 1 else 1
+                            self._conclude(winner, reason="timeout/disconnect")
+                            return
+                        # Ignore any extra line data; disconnect already handled above.
+
+                # Process buffered lines if any
+                self._line_buffer.clear()
+
                 attacker_r, attacker_w, defender_board, defender_name = self._select_players(current_player)
                 # Identify defender streams for out-of-turn monitoring
                 defender_idx = 2 if current_player == 1 else 1
@@ -178,21 +224,16 @@ class GameSession(threading.Thread):
 
                 # Send the attacker their current opponent grid view
                 self._send_grid(attacker_w, defender_board)
-                # Request coordinate
-                self._send(attacker_w, "INFO Your turn – FIRE <coord> or QUIT")
+                # Request coordinate (do NOT mirror to spectators)
+                self._send(attacker_w, "INFO Your turn – FIRE <coord> or QUIT", mirror_spec=False)
+                self._emit(Event(Category.TURN, "prompt", {"player": current_player}))
 
                 coord = self._receive_coord(attacker_r, attacker_w, defender_r, defender_w)
-                if coord is None:  # disconnect → start reconnection timer
-                    waiting_token = self.token_p1 if current_player == 1 else self.token_p2
-                    waiter_event = self._event_p1 if current_player == 1 else self._event_p2
-                    self._send(attacker_w, "INFO Disconnected. Waiting 60 s for reconnect...")
-                    start_wait = time.time()
-                    while time.time() - start_wait < 60:
-                        if waiter_event.wait(timeout=1):
-                            # reconnected
-                            attacker_r, attacker_w = self._file_pair(current_player)
-                            break
-                    else:
+                if coord == "DEFENDER_LEFT":
+                    winner = 2 if current_player == 1 else 1
+                    self._conclude(winner, reason="timeout/disconnect")
+                    return
+                if coord is None:
                         winner = 2 if current_player == 1 else 1
                         self._conclude(winner, reason="timeout/disconnect")
                         return
@@ -203,60 +244,49 @@ class GameSession(threading.Thread):
                     return
 
                 row, col = coord  # tuple[int, int]
+                # (Spectators no longer receive per-shot messages.)
+
                 # Peek ship letter before firing to identify which ship was hit (server console only)
                 orig_cell = defender_board.hidden_grid[row][col]
                 result, sunk_name = defender_board.fire_at(row, col)
                 coord_txt = self._coord_str(row, col)
 
-                # --- Core protocol messages (retain for bot/tests) ----
-                if result == "hit":
-                    self._send(attacker_w, f"HIT {coord_txt}")
-                    self._send(defender_w, f"HIT {coord_txt}")
-                    if sunk_name:
-                        self._send(attacker_w, f"SUNK {sunk_name}")
-                        self._send(defender_w, f"SUNK {sunk_name}")
-                elif result == "miss":
-                    self._send(attacker_w, f"MISS {coord_txt}")
-                    self._send(defender_w, f"MISS {coord_txt}")
-                elif result == "already_shot":
-                    self._send(attacker_w, f"ERR You already fired at {coord_txt} – choose a different coordinate")
-                    continue  # repeat turn
-
-                # --- Human-friendly descriptive messages --------------
+                # --- Human-friendly descriptive messages (single source of truth for clients/bots) ---
                 if result == "hit":
                     attacker_msg = f"YOU HIT at {coord_txt}"
                     defender_msg = f"OPPONENT HIT your ship at {coord_txt}"
                     if sunk_name:
                         attacker_msg = f"YOU SUNK opponent's {sunk_name} at {coord_txt}"
                         defender_msg = f"OPPONENT SUNK your {sunk_name} at {coord_txt}"
-                    spec_msg = (
-                        f"P{current_player} SUNK P{defender_idx}'s {sunk_name} at {coord_txt}"
-                        if sunk_name
-                        else f"P{current_player} HIT at {coord_txt}"
-                    )
                 else:  # miss
                     attacker_msg = f"YOU MISSED at {coord_txt}"
                     defender_msg = f"OPPONENT MISSED at {coord_txt}"
-                    spec_msg = f"P{current_player} MISSED at {coord_txt}"
 
                 self._send(attacker_w, attacker_msg)
                 self._send(defender_w, defender_msg)
-                for spec in list(self.spectator_w_files):
-                    self._send(spec, spec_msg)
-
-                # Compose server-console detail with ship type if hit
-                if result == "hit":
-                    inv = {v: k for k, v in SHIP_LETTERS.items()}
-                    hit_name = inv.get(orig_cell, "Unknown") if orig_cell not in {'.', 'o', 'X'} else "Unknown"
-                    print(f"[GAME] P{current_player} HIT {hit_name} at {coord_txt}")
-                elif result == "miss":
-                    print(f"[GAME] P{current_player} miss at {coord_txt}")
-                if sunk_name:
-                    print(f"[GAME] >>> {sunk_name} sunk by P{current_player}")
+                # Send per-shot messages to all spectators
+                for wfile in list(self.spectator_w_files):
+                    self._send(wfile, attacker_msg)
+                    self._send(wfile, defender_msg)
+                # (Spectators no longer receive per-shot HIT/MISS chatter.)
 
                 # Count valid shot (hit or miss)
                 if result in {"hit", "miss"}:
                     self._shots[current_player] += 1
+
+                    # Emit structured shot event for server routing
+                    self._emit(
+                        Event(
+                            Category.TURN,
+                            "shot",
+                            {
+                                "attacker": current_player,
+                                "coord": coord_txt,
+                                "result": result,
+                                "sunk": sunk_name or "",
+                            },
+                        )
+                    )
 
                 # Check game-over
                 if defender_board.all_ships_sunk():
@@ -264,8 +294,35 @@ class GameSession(threading.Thread):
                     return
 
                 # After each turn send updated own-board views to both players
-                self._send_grid(self.p1_file_w, self.board_p1, reveal=True)
-                self._send_grid(self.p2_file_w, self.board_p2, reveal=True)
+                ok1 = self._send_grid(self.p1_file_w, self.board_p1, reveal=True)
+                ok2 = self._send_grid(self.p2_file_w, self.board_p2, reveal=True)
+                if not ok1 or not ok2:
+                    winner = 2 if not ok1 else 1
+                    self._conclude(winner, reason="timeout/disconnect")
+                    return
+
+                # After each turn, check for disconnects on the non-turn player
+                non_turn_player = 2 if current_player == 1 else 1
+                non_turn_r, non_turn_w = self._file_pair(non_turn_player)
+                try:
+                    # Use select to poll for data with a short timeout
+                    sock = non_turn_r.buffer.raw._sock
+                    poll_delay = _cfg.SERVER_POLL_DELAY
+                    readable, _, _ = select.select([sock], [], [], poll_delay)
+                    if readable:
+                        line = non_turn_r.readline()
+                        if not line:
+                            print(f"[DEBUG] run: disconnect detected on player {non_turn_player} after turn (readline)")
+                            self._conclude(current_player, reason="timeout/disconnect")
+                            return
+                        # Ignore extra data read during poll – next turn will handle.
+                except Exception:
+                    pass
+
+                # After every *two* half-turns broadcast a fresh dual-board to spectators
+                self._half_turn_counter += 1
+                if self._half_turn_counter % 2 == 0:
+                    self._send_spec_update()
 
                 # Next player's turn
                 current_player = 2 if current_player == 1 else 1
@@ -276,6 +333,9 @@ class GameSession(threading.Thread):
                     with contextlib.suppress(Exception):
                         sock.shutdown(socket.SHUT_RDWR)
                     sock.close()
+
+            # One last board dump for any connected spectators.
+            self._send_spec_update()
 
     # -------------------- internal utilities --------------------
     def _select_players(self, current: int):
@@ -301,15 +361,17 @@ class GameSession(threading.Thread):
         """
         start = time.time()
         att_sock: socket.socket = r.buffer.raw._sock  # type: ignore[attr-defined]
-        def_sock: socket.socket = defender_r.buffer.raw._sock  # type: ignore[attr-defined]
+        def_sock: socket.socket = defender_r.buffer.raw._sock
 
         while True:
             remaining = TURN_TIMEOUT - (time.time() - start)
             if remaining <= 0:
+                print("[DEBUG] _receive_coord: turn timeout")
                 return None
             # Wait until either socket has data or timeout expires
             readable, _, _ = select.select([att_sock, def_sock], [], [], remaining)
             if not readable:
+                print("[DEBUG] _receive_coord: select timeout")
                 return None  # timeout
 
             for sock in readable:
@@ -317,8 +379,14 @@ class GameSession(threading.Thread):
                 try:
                     line = file.readline()
                 except socket.timeout:
-                    continue  # treat as no data after select glitch
+                    # No data despite select – continue polling
+                    continue
+                except OSError as ose:
+                    # Timed-out or other socket error → treat as disconnect
+                    print(f"[DEBUG] _receive_coord: OSError on {'attacker' if sock is att_sock else 'defender'} socket: {ose}")
+                    return None if sock is att_sock else "DEFENDER_LEFT"
                 if not line:  # disconnect
+                    print(f"[DEBUG] _receive_coord: disconnect detected on {'attacker' if sock is att_sock else 'defender'} socket")
                     return None if sock is att_sock else "DEFENDER_LEFT"
                 line = line.strip()
                 upper = line.upper()
@@ -331,8 +399,7 @@ class GameSession(threading.Thread):
                         chat_payload = {"name": f"P{idx}", "msg": chat_txt}
                         self._send(self.p1_file_w, f"[CHAT] P{idx}: {chat_txt}", PacketType.CHAT, chat_payload)
                         self._send(self.p2_file_w, f"[CHAT] P{idx}: {chat_txt}", PacketType.CHAT, chat_payload)
-                        for spec in list(self.spectator_w_files):
-                            self._send(spec, f"[CHAT] P{idx}: {chat_txt}", PacketType.CHAT, chat_payload)
+                        self._emit(Event(Category.CHAT, "line", {"player": idx, "msg": chat_txt}))
                         continue
                     elif upper == "QUIT":
                         winner = 1 if file is defender_r else 2
@@ -351,8 +418,7 @@ class GameSession(threading.Thread):
                         chat_payload = {"name": f"P{idx}", "msg": chat_txt}
                         self._send(self.p1_file_w, f"[CHAT] P{idx}: {chat_txt}", PacketType.CHAT, chat_payload)
                         self._send(self.p2_file_w, f"[CHAT] P{idx}: {chat_txt}", PacketType.CHAT, chat_payload)
-                        for spec in list(self.spectator_w_files):
-                            self._send(spec, f"[CHAT] P{idx}: {chat_txt}", PacketType.CHAT, chat_payload)
+                        self._emit(Event(Category.CHAT, "line", {"player": idx, "msg": chat_txt}))
                         continue
                     if upper == "QUIT":
                         return "QUIT"
@@ -365,20 +431,24 @@ class GameSession(threading.Thread):
                         self._send(w, "ERR Invalid coordinate. Example: FIRE B7")
 
     def _conclude(self, winner: int, *, reason: str) -> None:
+        print(f"[DEBUG] _conclude: winner={winner}, reason={reason}")
         loser = 2 if winner == 1 else 1
         win_w = self.p1_file_w if winner == 1 else self.p2_file_w
         lose_w = self.p2_file_w if winner == 1 else self.p1_file_w
         shots = self._shots.get(winner, 0)
-        self._send(win_w, "WIN")
-        self._send(lose_w, "LOSE")
-        self._send(win_w, f"INFO Victory by {reason} in {shots} shots.")
-        self._send(lose_w, f"INFO Defeat by {reason}.")
+        self._send(win_w, f"YOU HAVE WON WITH {shots} SHOTS", mirror_spec=False)
+        self._send(lose_w, f"YOU HAVE LOST – opponent won with {shots} shots", mirror_spec=False)
 
         # Record result for server logs
         self.winner = winner
         self.win_reason = reason
         self.win_shots = shots  # type: ignore[attr-defined]
-        print(f"[GAME] Match finished – P{winner} wins by {reason} in {shots} shots.")
+        # Spectators no longer receive free-text finale; emit line to server logs only.
+        result_line = f"[GAME] Match finished – P{winner} wins by {reason} in {shots} shots."
+        print(result_line)
+
+        # Emit end-of-game event
+        self._emit(Event(Category.TURN, "end", {"winner": winner, "reason": reason, "shots": shots}))
 
     @staticmethod
     def _coord_str(row: int, col: int) -> str:  # Helper for "HIT B5"
@@ -390,7 +460,10 @@ class GameSession(threading.Thread):
         with self._lock:
             wfile = sock.makefile("w")
             self.spectator_w_files.append(wfile)
-            self._send(wfile, "INFO You are now spectating the current match.")
+            # Welcome message – no mirroring so we avoid a duplicate.
+            self._send(wfile, "YOU ARE SPECTATING")
+            print("[DEBUG] Spectator attached", flush=True)  # Log for test harness
+            self._emit(Event(Category.SYSTEM, "spectator_join", {}))
 
     # ---------------- reconnect API -----------------
     def attach_player(self, token: str, sock: socket.socket) -> bool:
@@ -420,7 +493,7 @@ class GameSession(threading.Thread):
 
         # Temporarily set small timeout so tests/non-interactive clients proceed automatically
         sock_pref: socket.socket = r.buffer.raw._sock  # type: ignore[attr-defined]
-        sock_pref.settimeout(30)  # user has half a minute to respond
+        sock_pref.settimeout(_cfg.PLACEMENT_TIMEOUT)
         try:
             choice_line = r.readline()
         except Exception:
@@ -485,4 +558,55 @@ class GameSession(threading.Thread):
 
         self._send_grid(w, board, reveal=True)
         self._send(w, "INFO All ships placed – waiting for opponent…")
+
+    # ---------------- spectator utilities -----------------
+
+    def _grid_rows(self, board: Board) -> list[str]:
+        """Return a *list[str]* representation of *board* with ships revealed."""
+        rows: list[str] = []
+        for r in range(board.size):
+            row_cells = [board.hidden_grid[r][c] for c in range(board.size)]
+            rows.append(" ".join(row_cells))
+        return rows
+
+    def _send_spec_update(self) -> None:
+        """Send a *dual-board* snapshot to every connected spectator.
+
+        The payload uses a dedicated `type:"spec_grid"` discriminator so that
+        future spectator clients can render a bespoke view.  Both boards are
+        sent **with ships revealed** so spectators can follow the full game
+        progression.  Updates are emitted *once every two shots* (i.e. after
+        each full round) plus an initial frame before the first turn.
+        """
+        # Send spec-grid to both players and any connected spectators
+        recipients = [self.p1_file_w, self.p2_file_w] + list(self.spectator_w_files)
+        if not recipients:
+            return
+
+        payload = {
+            "type": "spec_grid",
+            "rows_p1": self._grid_rows(self.board_p1),
+            "rows_p2": self._grid_rows(self.board_p2),
+        }
+        for wfile in recipients:
+            ok = self._send(wfile, ptype=PacketType.GAME, obj=payload)
+            if wfile in self.spectator_w_files and not ok:
+                # Drop dead spectator connections
+                self.spectator_w_files.remove(wfile)
+
+    # -------------------- event bus --------------------
+    def subscribe(self, cb: Callable[[Event], None]) -> None:
+        """Allow external components (server/logger) to receive game events."""
+        self._subs.append(cb)
+
+    def _emit(self, ev: Event) -> None:
+        for cb in tuple(self._subs):
+            try:
+                cb(ev)
+            except Exception:
+                # Don't let a misbehaving subscriber kill the game thread
+                pass
+
+# End of GameSession module
+# EOF
 

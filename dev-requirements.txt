@@ -6,3 +6,4 @@ pytest-timeout==2.3.1
 pre-commit==3.7.0
 cryptography==42.0.5
 docstr-coverage==2.2.0
+pytest-cov

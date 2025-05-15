@@ -27,10 +27,12 @@ if [ -n "${2-}" ]; then
   PYTHON_BIN="$2"
 else
   # Try to locate Homebrew's python@3.11 first (Apple Silicon and Intel prefixes)
-  if command -v "/opt/homebrew/opt/python@3.11/bin/python3" &>/dev/null; then
-    PYTHON_BIN="/opt/homebrew/opt/python@3.11/bin/python3"
+  if command -v "/opt/homebrew/python@3.11/bin/python3" &>/dev/null; then
+    PYTHON_BIN="/opt/homebrew/python@3.11/bin/python3"
   elif command -v "/usr/local/opt/python@3.11/bin/python3" &>/dev/null; then
     PYTHON_BIN="/usr/local/opt/python@3.11/bin/python3"
+  elif command -v python3.11 &>/dev/null; then
+    PYTHON_BIN="python3.11"
   elif command -v brew &>/dev/null && BREW_PY=$(brew --prefix python@3.11 2>/dev/null)/bin/python3 && [ -x "$BREW_PY" ]; then
     PYTHON_BIN="$BREW_PY"
   else

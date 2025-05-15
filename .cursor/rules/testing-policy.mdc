@@ -1,0 +1,55 @@
+---
+description:
+globs:
+alwaysApply: true
+---
+# Testing & Coverage Rule
+Focus on one test at a time. Only debug and run one test, until it passes, then immediately, without prompting me, move on to the next test.
+Once you have finished debugging tests, do not prompt me, the user, to run the tests, YOU, the cursor agent, need to run the tests yourself. Not only does this streamline the overall workflow, it gives you full and immediate access to the testing output. If you need to add debugging logging to a test, just do it and run the test again, then debug, then run the test again. Continue iterating until all tests you have finished debugging actually pass.
+This rule defines expectations for **all** automated tests in the BEER project.
+Please remeber, all tests must run completely clean without any warnings, errors, cautions, and deprecations.
+Tests are designed to uncover poorly written code.Evaluate the intended functionality and bake this into the the test.
+Never assume that the only reason a test fails is because the test was written badly. Many features of this project have not been implemented robustly.
+We aim to harden our code with testing, not write tests that pass immediately and easily.
+
+
+## 1 Coverage
+* Combined statement coverage for `src/` must be **= 100%** (measured via `pytest --cov=src`).
+* Any drop below 90 % blocks CI; use `# pragma: no cover` sparingly (only for truly unreachable code, e.g. OS-specific paths).
+
+## 2 Test Structure
+```
+/tests
+├── unit/         # pure logic / fast
+├── integration/  # network, threads, subprocesses
+└── e2e/          # optional, full Docker compose spin-up
+```
+* Each directory contains its own `__init__.py` so tests can share fixtures.
+* Network/integration tests must use **localhost** and ephemeral ports (use `socket` to bind port 0 when possible).
+
+## 3 Conventions
+1. Test filenames: `test_<area>_<feature>.py`.
+2. Function names: `test_<condition>_<expected>()`.
+3. Avoid hard sleeps; use `asyncio.wait_for` or polling with timeout.
+4. Keep individual test runtime **< 2 s**; integration tests may take up to 10 s.
+
+## 4 CI matrix
+* `pytest -q` runs on **Linux x86_64** and **macOS (arm64 on GitHub M1 runners)**.
+* Containers use the same command; ensure no `/tmp` or home-dir writes that violate container immutability.
+
+## 5 Fixtures & Utilities
+* Place reusable helpers in `tests/conftest.py`.
+* Each fixture must clean up its own resources with `yield` and `finally`.
+
+## 6 Tiered Integration Test Policy
+* For every tier and sub-tier (see BEER_Project_Transcription.md, tier_tests.md), there must be a dedicated automated test in `tests/tierN/` that launches real client(s) and attaches bots to exercise the required behaviour.
+* Each test must:
+  - Use actual client/server processes (no mocks)
+  - Be robust, repeatable, and clean up all resources
+  - Be CI-compatible (no manual steps)
+  - Cover all sub-tier requirements (e.g. out-of-order shots, reconnect, lobby, chat, etc.)
+* Directory structure:
+  - `tests/tier1/`, `tests/tier2/`, `tests/tier3/`, `tests/tier4/`
+* Each sub-tier (e.g. T1.1, T2.3) gets its own test file and, if needed, a custom bot implementation.
+
+Adhering to this rule guarantees fast, reliable, and portable tests.

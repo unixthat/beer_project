@@ -6,7 +6,9 @@ import argparse
 import socket
 import threading
 from io import BufferedReader, BufferedWriter
-from typing import TextIO, Optional
+from typing import TextIO, Optional, Callable, Dict
+import os
+import logging
 
 from .common import (
     PacketType,
@@ -17,9 +19,15 @@ from .common import (
     DEFAULT_KEY,
 )
 from .battleship import SHIP_LETTERS
+from . import config as _cfg
 
-HOST = "127.0.0.1"
-PORT = 5000
+HOST = _cfg.DEFAULT_HOST
+PORT = _cfg.DEFAULT_PORT
+
+# Logging setup respects global DEBUG flag
+logging.basicConfig(level=logging.DEBUG if _cfg.DEBUG else logging.INFO,
+                    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------- receiver -----------------------------
@@ -54,24 +62,41 @@ def _is_reveal_grid(rows: list[str]) -> bool:
     return False
 
 
-def _print_dual_grid(opp_rows: list[str], own_rows: list[str]) -> None:
-    """Pretty-print *opp_rows* and *own_rows* side by side."""
+def _print_two_grids(
+    left_rows: list[str],
+    right_rows: list[str],
+    *,
+    header_left: str,
+    header_right: str,
+) -> None:
+    """Helper to print two 10×10 boards side-by-side with custom headers."""
 
-    if not opp_rows or not own_rows:
+    if not left_rows or not right_rows:
         return
 
-    print("\n[Opponent Board]                        |   [Your Fleet]")
-    columns = len(opp_rows[0].split())
-    header = "   " + " ".join(f"{i:>2}" for i in range(1, columns + 1))
-    print(f"{header}   |   {header}")
+    columns = len(left_rows[0].split())
+    numeric_header = "   " + " ".join(f"{i:>2}" for i in range(1, columns + 1))
 
-    for idx in range(len(opp_rows)):
+    board_width = len(numeric_header)
+    left_header_text = f"[{header_left}]"
+    right_header_text = f"[{header_right}]"
+
+    left_header = left_header_text.center(board_width)
+    right_header = right_header_text.center(board_width)
+
+    # Print centred headers without the previous pipe separator
+    print(f"\n{left_header}   {right_header}")
+
+    # Print numeric column labels (no pipe)
+    print(f"{numeric_header}   {numeric_header}")
+
+    for idx in range(len(left_rows)):
         label = chr(ord("A") + idx)
-        opp_cells = opp_rows[idx].split()
-        own_cells = own_rows[idx].split()
-        left = " ".join(f"{c:>2}" for c in opp_cells)
-        right = " ".join(f"{c:>2}" for c in own_cells)
-        print(f"{label:2} {left}   |   {label:2} {right}")
+        left_cells = left_rows[idx].split()
+        right_cells = right_rows[idx].split()
+        left = " ".join(f"{c:>2}" for c in left_cells)
+        right = " ".join(f"{c:>2}" for c in right_cells)
+        print(f"{label:2} {left}   {label:2} {right}")
 
 
 # ------------------------------------------------------------
@@ -79,12 +104,73 @@ def _print_dual_grid(opp_rows: list[str], own_rows: list[str]) -> None:
 # ------------------------------------------------------------
 
 
-def _recv_loop(sock: socket.socket, stop_evt: threading.Event) -> None:  # pragma: no cover
+def _recv_loop(sock: socket.socket, stop_evt: threading.Event, verbose: int) -> None:  # pragma: no cover
     """Continuously print messages from the server (framed packets only)."""
     br = sock.makefile("rb")  # buffered reader
 
     last_opp: Optional[list[str]] = None
     last_own: Optional[list[str]] = None
+
+    # ---------------- Handler helpers ----------------
+
+    def h_spec_grid(obj: dict) -> None:
+        if verbose < 2 or "spec_grid" in _cfg.QUIET_CATEGORIES:
+            return
+        rows_p1 = obj.get("rows_p1", [])
+        rows_p2 = obj.get("rows_p2", [])
+        _print_two_grids(rows_p1, rows_p2, header_left="Player 1", header_right="Player 2")
+
+    def h_grid(obj: dict) -> None:
+        rows = obj["rows"]
+        if _is_reveal_grid(rows):
+            # store own rows for later dual render
+            nonlocal last_own
+            last_own = rows
+        else:
+            nonlocal last_opp
+            last_opp = rows
+            # always print dual-board at default verbosity
+            if verbose >= 0 and last_own and "grid" not in _cfg.QUIET_CATEGORIES:
+                _print_two_grids(last_opp, last_own, header_left="Opponent Fleet", header_right="Your Fleet")
+
+    def h_shot(obj: dict) -> None:
+        if "shot" in _cfg.QUIET_CATEGORIES:
+            return
+        attacker = obj.get("player")
+        coord = obj.get("coord")
+        result = obj.get("result")
+        sunk = obj.get("sunk") or ""
+        if verbose >= 0:
+            line = f"SHOT {coord} (P{attacker} {result})"
+            if sunk:
+                line += f" SUNK {sunk}"
+            print(line)
+
+    def h_chat(obj: dict) -> None:
+        if "chat" in _cfg.QUIET_CATEGORIES:
+            return
+        name = obj.get("name")
+        msg_txt = obj.get("msg")
+        if verbose >= 0:
+            print(f"[CHAT] {name}: {msg_txt}")
+
+    def h_end(obj: dict) -> None:
+        if "end" in _cfg.QUIET_CATEGORIES:
+            return
+        winner = obj.get("winner")
+        shots = obj.get("shots")
+        if winner == 1:
+            print(f"YOU WON with {shots} shots")
+        else:
+            print(f"YOU LOST – opponent won with {shots} shots")
+
+    handlers: Dict[str, Callable[[dict], None]] = {
+        "spec_grid": h_spec_grid,
+        "grid": h_grid,
+        "shot": h_shot,
+        "chat": h_chat,
+        "end": h_end,
+    }
 
     try:
         while True:
@@ -92,41 +178,43 @@ def _recv_loop(sock: socket.socket, stop_evt: threading.Event) -> None:  # pragm
                 ptype, seq, obj = recv_pkt(br)  # type: ignore[arg-type]
             except IncompleteError:
                 # Stream closed cleanly – exit receiver loop without warning.
-                stop_evt.set(); break
+                stop_evt.set()
+                break
             except FrameError as exc:
-                print(f"[WARN] Frame error: {exc}.")
-                stop_evt.set(); break
+                if verbose >= 0:
+                    print(f"[WARN] Frame error: {exc}.")
+                stop_evt.set()
+                break
             except Exception:
                 # Socket closed or unreadable – terminate receiver thread.
-                stop_evt.set(); break
+                stop_evt.set()
+                break
 
             if ptype == PacketType.GAME and isinstance(obj, dict):
-                if obj.get("type") == "grid":
-                    rows = obj["rows"]
-                    if _is_reveal_grid(rows):
-                        # Own fleet grid – store for later but don't print yet.
-                        last_own = rows
-                    else:
-                        # Opponent board grid – print combined view using the
-                        # latest own-grid snapshot (if any). This happens once
-                        # at the start of *our* turn and avoids the duplicate
-                        # print that previously occurred right after our shot.
-                        last_opp = rows
-                        if last_own:
-                            _print_dual_grid(last_opp, last_own)
+                if _cfg.DEBUG:
+                    logger.debug("Recv packet %s", obj)
+                p = obj.get("type")
+                if p in handlers:
+                    handlers[p](obj)
                 else:
-                    msg = obj.get("msg", obj)
-                    # Ignore low-level HIT/MISS/SUNK protocol lines – we rely on
-                    # descriptive messages instead.
-                    if isinstance(msg, str) and msg.startswith(("HIT ", "MISS", "SUNK")):
+                    # Fallback: server text (INFO/ERR) and raw frames
+                    msg = obj.get("msg", "")
+                    if not msg:
                         continue
-                    print(msg)
-            elif ptype == PacketType.CHAT:
-                print(f"[CHAT] {obj.get('name')}: {obj.get('msg')}")
+                    # INFO messages always shown at default verbosity
+                    if msg.startswith("INFO ") or msg.startswith("ERR "):
+                        print(msg)
+                    # Raw/unrecognized frames at verbose>=1
+                    elif verbose >= 1 and "raw" not in _cfg.QUIET_CATEGORIES:
+                        print(obj)
+            elif ptype == PacketType.CHAT and isinstance(obj, dict):
+                handlers["chat"](obj)
             else:
-                print(obj)
+                if verbose >= 1 and "raw" not in _cfg.QUIET_CATEGORIES:
+                    print(obj)
     except Exception as exc:  # noqa: BLE001
-        print(f"[ERROR] Receiver thread crashed: {exc!r}")
+        if verbose >= 0:
+            print(f"[ERROR] Receiver thread crashed: {exc!r}")
     finally:
         stop_evt.set()
 
@@ -143,7 +231,33 @@ def main() -> None:    # pragma: no cover – CLI entry
     parser.add_argument(
         "--secure", nargs="?", const="default", help="Enable AES-CTR encryption optionally with hex key"
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug logging.",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="count",
+        default=0,
+        help="Increase verbosity (stackable)",
+    )
+    parser.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Suppress most output",
+    )
     args = parser.parse_args()
+
+    # Set the BEER_DEBUG environment variable based on the --debug flag
+    if args.debug:
+        os.environ["BEER_DEBUG"] = "1"
+
+    # Determine effective verbosity
+    global _VERBOSE_LEVEL  # noqa: PLW0603
+    _VERBOSE_LEVEL = -1 if args.quiet else args.verbose
 
     if args.secure is not None:
         key = DEFAULT_KEY if args.secure == "default" else bytes.fromhex(args.secure)
@@ -151,15 +265,15 @@ def main() -> None:    # pragma: no cover – CLI entry
         print("[INFO] Encryption enabled in client")
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        _extracted_from_main_18(s, args)
+        _client(s, args)
 
 
-# TODO Rename this here and in `main`
-def _extracted_from_main_18(s, args):
+# Internal client loop invoked from main
+def _client(s, args):
     s.connect((args.host, args.port))
 
     stop_evt = threading.Event()
-    receiver = threading.Thread(target=_recv_loop, args=(s, stop_evt), daemon=True)
+    receiver = threading.Thread(target=_recv_loop, args=(s, stop_evt, _VERBOSE_LEVEL), daemon=True)
     receiver.start()
 
     wfile = s.makefile("w")
@@ -172,7 +286,8 @@ def _extracted_from_main_18(s, args):
 
             # Non-blocking prompt when server disconnected: input would still block.
             # Use select on stdin to avoid hang after disconnection.
-            import sys, select
+            import sys
+            import select
             if not locals().get("_prompt_shown", False):
                 print(">> ", end="", flush=True)
                 _prompt_shown = True  # type: ignore[var-annotated]

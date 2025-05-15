@@ -1,0 +1,25 @@
+---
+description:
+globs:
+alwaysApply: true
+---
+---
+description: Always include the implementation roadmap for context
+alwaysApply: true
+---
+@roadmap.md
+
+The x86_64 implementation neeeds to be fully green before we go to the arm64 implementation.
+
+If the task changes or pivots, please ensure the [roadmap.md](mdc:roadmap.md) is updated accordingly.
+
+If in doubt, always refer to the indexed documentation:
+
+## 5 Relevant External Documentation
+Indexed references you can pull into any prompt with `@Docs`:
+* @Packer/vmware-vmx – Packer builder docs for VMware VMs
+* @vmware/usage – official provider usage guide (`--provider vmware_desktop`)
+* @VMware Fusion – product documentation and CLI tools
+* @ubuntu-vagrant – metadata for the generic Ubuntu 20.04 base box
+* @rules-for-ai – Cursor global-rules documentation
+* @context-rules – Cursor project-rules MDC specification
