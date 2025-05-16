@@ -152,11 +152,7 @@ class GameSession(threading.Thread):
         return True
 
     def _send_grid(self, w: TextIO, board: Board, *, reveal: bool = False) -> bool:
-        """Send a grid view to *w*.
-
-        Args:
-            reveal: If True, ship letters are shown (used during manual placement).
-        """
+        """Send a grid view to *w*."""
         rows = []
         for r in range(board.size):
             row_cells = []
@@ -173,37 +169,42 @@ class GameSession(threading.Thread):
         grid_payload = {"type": "grid", "rows": rows}
         return self._send(w, "GRID", PacketType.GAME, grid_payload)
 
+    # ------------------- match handshake helper -------------------
+    def _begin_match(self) -> None:
+        """Handshake to start or restart a match: START, placement, initial grids, signal ready."""
+        # Emit start event and notify both players
+        self._emit(Event(Category.TURN, "start", {"token_p1": self.token_p1, "token_p2": self.token_p2}))
+        self._send(self.p1_file_w, "INFO New game: you are Player 1", mirror_spec=False)
+        self._send(self.p2_file_w, "INFO New game: you are Player 2", mirror_spec=False)
+        # Legacy START frames for compatibility
+        self._send(self.p1_file_w, f"START you {self.token_p1}", mirror_spec=False)
+        self._send(self.p2_file_w, f"START opp {self.token_p2}", mirror_spec=False)
+
+        # Manual placement phase (blank → auto placement by default)
+        t1 = threading.Thread(target=self._handle_ship_placement, args=(1,), daemon=True)
+        t2 = threading.Thread(target=self._handle_ship_placement, args=(2,), daemon=True)
+        t1.start(); t2.start()
+        t1.join(); t2.join()
+
+        # Initial own-fleet reveal
+        self._send_grid(self.p1_file_w, self.board_p1, reveal=True)
+        self._send_grid(self.p2_file_w, self.board_p2, reveal=True)
+        # Initial opponent views
+        self._send_grid(self.p1_file_w, self.board_p2)
+        self._send_grid(self.p2_file_w, self.board_p1)
+
+        # Signal ready for spectators
+        if self.session_ready:
+            self.session_ready.set()
+
     # -------------------- gameplay --------------------
     def run(self) -> None:  # noqa: C901 complexity – fine for server thread
         """Main game-loop executed in its own thread until the match ends."""
-        # sourcery skip: low-code-quality
         try:
-            # Inform players of their order – P1 starts, include reconnect token
-            self._emit(Event(Category.TURN, "start", {"token_p1": self.token_p1, "token_p2": self.token_p2}))
-            # Legacy START frames (maintain compatibility during migration)
-            self._send(self.p1_file_w, f"START you {self.token_p1}")
-            self._send(self.p2_file_w, f"START opp {self.token_p2}")
-
-            # ------------------ optional manual placement -------------------
-            t1 = threading.Thread(target=self._handle_ship_placement, args=(1,))
-            t2 = threading.Thread(target=self._handle_ship_placement, args=(2,))
-            t1.start()
-            t2.start()
-            t1.join()
-            t2.join()
-
-            # Initial own-fleet views to each player
-            self._send_grid(self.p1_file_w, self.board_p1, reveal=True)
-            self._send_grid(self.p2_file_w, self.board_p2, reveal=True)
-            # Initial opponent views so players start with boards
-            self._send_grid(self.p1_file_w, self.board_p2)
-            self._send_grid(self.p2_file_w, self.board_p1)
+            # Start the first match handshake
+            self._begin_match()
             # Skip the first per-turn grid (to avoid duplicate start display)
             first_turn = True
-            # Now signal ready for spectators (boards are finalized)
-            if self.session_ready:
-                self.session_ready.set()
-
             current_player = 1
 
             while True:
@@ -506,6 +507,10 @@ class GameSession(threading.Thread):
     def _promote_spectator(self, slot: int) -> bool:
         """Replace a disconnected player (1 or 2) with the next spectator."""
         with self._lock:
+            # Notify the surviving player
+            other_idx = 2 if slot == 1 else 1
+            other_w = self.p2_file_w if slot == 1 else self.p1_file_w
+            self._send(other_w, f"INFO Opponent disconnected – starting new game (you remain Player {other_idx})", mirror_spec=False)
             if not self.spectator_sockets:
                 return False
             new_sock = self.spectator_sockets.pop(0)
@@ -523,8 +528,8 @@ class GameSession(threading.Thread):
                 print(f"[INFO] Spectator promoted to Player {slot}")
                 board, wfile = self.board_p2, self.p2_file_w
 
-            # Advise the promoted client…
-            self._send(wfile, "[INFO] YOU ARE NOW PLAYING", mirror_spec=False)
+            # Advise the promoted client
+            self._send(wfile, "INFO YOU ARE NOW PLAYING – you've replaced the disconnected opponent", mirror_spec=False)
 
             # Reset everything for a brand-new match
             self.board_p1 = Board()
@@ -532,22 +537,8 @@ class GameSession(threading.Thread):
             self.board_p1.place_ships_randomly(self.ships)
             self.board_p2.place_ships_randomly(self.ships)
 
-            # Legacy START frames (kick off match, include reconnect tokens)
-            self._send(self.p1_file_w, f"START you {self.token_p1}")
-            self._send(self.p2_file_w, f"START opp {self.token_p2}")
-
-            # Optional manual placement for both players
-            t1 = threading.Thread(target=self._handle_ship_placement, args=(1,), daemon=True)
-            t2 = threading.Thread(target=self._handle_ship_placement, args=(2,), daemon=True)
-            t1.start(); t2.start()
-            t1.join(); t2.join()
-
-            # Send each player their fresh own-fleet grids
-            self._send_grid(self.p1_file_w, self.board_p1, reveal=True)
-            self._send_grid(self.p2_file_w, self.board_p2, reveal=True)
-
-            # Send an initial spectator snapshot
-            self._send_spec_update()
+            # Begin a new match handshake
+            self._begin_match()
             return True
 
     # ---------------- reconnect API -----------------
@@ -557,12 +548,18 @@ class GameSession(threading.Thread):
             self.p1_sock = sock
             self.p1_file_r = sock.makefile("r")
             self.p1_file_w = sock.makefile("w")
+            # Notify both sides about reconnection
+            self._send(self.p1_file_w, "INFO You have reconnected – resuming match", mirror_spec=False)
+            self._send(self.p2_file_w, "INFO Opponent has reconnected – resuming match", mirror_spec=False)
             self._event_p1.set()
             return True
         if token == self.token_p2:
             self.p2_sock = sock
             self.p2_file_r = sock.makefile("r")
             self.p2_file_w = sock.makefile("w")
+            # Notify both sides about reconnection
+            self._send(self.p2_file_w, "INFO You have reconnected – resuming match", mirror_spec=False)
+            self._send(self.p1_file_w, "INFO Opponent has reconnected – resuming match", mirror_spec=False)
             self._event_p2.set()
             return True
         return False
