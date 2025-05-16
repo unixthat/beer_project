@@ -121,6 +121,8 @@ class GameSession(threading.Thread):
 
         # Added for the new run method
         self._line_buffer: dict[int, str] = {}
+        # After a promotion handshake, skip the next per-turn grid send
+        self._skip_next_grid: bool = False
 
     # -------------------- helpers --------------------
     def _send(
@@ -235,6 +237,9 @@ class GameSession(threading.Thread):
                 # Send the attacker their current opponent grid view (skip on first turn)
                 if first_turn:
                     first_turn = False
+                elif self._skip_next_grid:
+                    # one-time skip after promotion handshake
+                    self._skip_next_grid = False
                 else:
                     self._send_grid(attacker_w, defender_board)
                 # Request coordinate (do NOT mirror to spectators)
@@ -530,13 +535,8 @@ class GameSession(threading.Thread):
 
             # Advise the promoted client
             self._send(wfile, "INFO YOU ARE NOW PLAYING – you've replaced the disconnected opponent", mirror_spec=False)
-
-            # Reset everything for a brand-new match
-            self.board_p1 = Board()
-            self.board_p2 = Board()
-            self.board_p1.place_ships_randomly(self.ships)
-            self.board_p2.place_ships_randomly(self.ships)
-
+            # One-time skip of the per-turn grid send in run() (already sent fresh grids)
+            self._skip_next_grid = True
             # Begin a new match handshake
             self._begin_match()
             return True

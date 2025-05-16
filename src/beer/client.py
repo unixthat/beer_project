@@ -105,6 +105,11 @@ def _print_two_grids(
 # ------------------------------------------------------------
 
 
+def _prompt() -> None:
+    """Display the user-input prompt."""
+    print(">> ", end="", flush=True)
+
+
 def _recv_loop(sock: socket.socket, stop_evt: threading.Event, verbose: int) -> None:  # pragma: no cover
     """Continuously print messages from the server (framed packets only)."""
     br = sock.makefile("rb")  # buffered reader
@@ -204,9 +209,7 @@ def _recv_loop(sock: socket.socket, stop_evt: threading.Event, verbose: int) -> 
                         continue
                     # INFO messages always shown at default verbosity
                     if msg.startswith("INFO ") or msg.startswith("ERR ") or msg.startswith("[INFO] "):
-                        print(msg)
-                        # re-display prompt after server message
-                        print(">> ", end="", flush=True)
+                        print(f"\r{msg}")
                     # Raw/unrecognized frames at verbose>=1
                     elif verbose >= 1 and "raw" not in _cfg.QUIET_CATEGORIES:
                         print(obj)
@@ -312,7 +315,7 @@ def _client(s, args):
             import sys
             import select
             if not locals().get("_prompt_shown", False):
-                print(">> ", end="", flush=True)
+                _prompt()
                 _prompt_shown = True  # type: ignore[var-annotated]
 
             ready, _, _ = select.select([sys.stdin], [], [], 0.5)
