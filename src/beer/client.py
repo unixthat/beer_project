@@ -9,6 +9,7 @@ from io import BufferedReader, BufferedWriter
 from typing import TextIO, Optional, Callable, Dict
 import os
 import logging
+import time
 
 from .common import (
     PacketType,
@@ -114,7 +115,7 @@ def _recv_loop(sock: socket.socket, stop_evt: threading.Event, verbose: int) -> 
     # ---------------- Handler helpers ----------------
 
     def h_spec_grid(obj: dict) -> None:
-        if verbose < 2 or "spec_grid" in _cfg.QUIET_CATEGORIES:
+        if "spec_grid" in _cfg.QUIET_CATEGORIES:
             return
         rows_p1 = obj.get("rows_p1", [])
         rows_p2 = obj.get("rows_p2", [])
@@ -202,8 +203,10 @@ def _recv_loop(sock: socket.socket, stop_evt: threading.Event, verbose: int) -> 
                     if not msg:
                         continue
                     # INFO messages always shown at default verbosity
-                    if msg.startswith("INFO ") or msg.startswith("ERR "):
+                    if msg.startswith("INFO ") or msg.startswith("ERR ") or msg.startswith("[INFO] "):
                         print(msg)
+                        # re-display prompt after server message
+                        print(">> ", end="", flush=True)
                     # Raw/unrecognized frames at verbose>=1
                     elif verbose >= 1 and "raw" not in _cfg.QUIET_CATEGORIES:
                         print(obj)
@@ -270,7 +273,27 @@ def main() -> None:    # pragma: no cover – CLI entry
 
 # Internal client loop invoked from main
 def _client(s, args):
-    s.connect((args.host, args.port))
+    addr = (args.host, args.port)
+    # Retry loop: once-per-second until connected or interrupted
+    while True:
+        try:
+            s.connect(addr)
+            print(f"[INFO] Connected to server at {addr}", flush=True)
+            break
+        except KeyboardInterrupt:
+            print("\n[INFO] Client exiting.")
+            return
+        except (ConnectionRefusedError, OSError):
+            print(f"[INFO] Server not ready at {addr}, retrying in 1s…", flush=True)
+            s.close()
+            import socket as _socket
+            s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        try:
+            import time
+            time.sleep(1)
+        except KeyboardInterrupt:
+            print("\n[INFO] Client exiting.")
+            return
 
     stop_evt = threading.Event()
     receiver = threading.Thread(target=_recv_loop, args=(s, stop_evt, _VERBOSE_LEVEL), daemon=True)

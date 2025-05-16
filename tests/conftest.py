@@ -26,6 +26,11 @@ PROJECT_ROOT = os.path.abspath(os.path.join(PROJECT_ROOT, '..'))
 # Ensure persistent tests/logs directory exists for bot logs
 os.makedirs(_cfg.TEST_LOG_DIR, exist_ok=True)
 
+def introduce_bot_delay(delay: float = 0.0):
+    """Ensure bots run with a small delay, typically used so a spectator can join before match concludes in testing."""
+    # Only set if not already specified
+    os.environ.setdefault("BEER_BOT_DELAY", delay)
+
 def get_free_port() -> int:
     """Find a free port on localhost for test server/client."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -43,7 +48,7 @@ def beer_server(tmp_path):
     env["BEER_PORT"] = str(port)
     logfile = tmp_path / "server.log"
     proc = subprocess.Popen([
-        sys.executable, "-m", "beer.server"
+        sys.executable, "-u", "-m", "beer.server", "--verbose"
     ], env=env, cwd=PROJECT_ROOT, stdout=logfile.open("w"), stderr=subprocess.STDOUT)
     # Wait for server to start
     time.sleep(1.0)

@@ -10,74 +10,97 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-# ---------------------------------------------------------------------------
-# Test Log Directory (used by test helpers)
-# ---------------------------------------------------------------------------
-# Points to <project_root>/tests/logs/
+# ===========================================================================
+# Test Log Directory
+# ===========================================================================
+# Directory where bot and server logs are stored during automated tests.
+# Path: <project_root>/tests/logs/
 TEST_LOG_DIR = Path(__file__).resolve().parent.parent / "tests" / "logs"
 
-# ---------------------------------------------------------------------------
-# Bot timing
-# ---------------------------------------------------------------------------
-# Delay (in seconds) between iterations of the main bot sender loop.
-# Defaults to **0.0** (no delay, maximum speed).  Integration tests can set
-#   export BEER_BOT_DELAY=0.05
-# to make log interleaving more deterministic.
+
+# ===========================================================================
+# Bot Timing Controls
+# ===========================================================================
+# BEER_BOT_DELAY: Delay (in seconds) between each bot shot/action.
+#   Defaults to 0.0 (maximum speed).
+#   Example: export BEER_BOT_DELAY=0.05
 BOT_LOOP_DELAY: float = float(os.getenv("BEER_BOT_DELAY", "0"))
 
-# ---------------------------------------------------------------------------
-# Bot algorithm selection
-# ---------------------------------------------------------------------------
-# When True the client/bot will use the simplistic parity-only strategy.
-# Default = False (use advanced axis-targeting AI).  Can be overridden via
-#   export BEER_SIMPLE_BOT=1
-# or the `--simple` CLI flag on `beer.bot` which sets this at runtime before
-# spawning the strategy engine.
+# BEER_BOT_DELAY_START: Delay (in seconds) before the bot fires its very first shot after connecting.
+#   Defaults to 0.0. Useful for allowing spectators or other clients to join before the game begins.
+#   Example: export BEER_BOT_DELAY_START=1.0
+DELAY_START: float = float(os.getenv("BEER_BOT_DELAY_START", "0"))
 
+
+# ===========================================================================
+# Bot Algorithm Selection
+# ===========================================================================
+# BEER_SIMPLE_BOT: If "1", the bot uses a simplistic parity-only targeting strategy.
+#   Defaults to "0" (use advanced axis-targeting AI).
+#   Can also be set via the `--simple` CLI flag on `beer.bot`.
+#   Example: export BEER_SIMPLE_BOT=1
 SIMPLE_BOT: bool = os.getenv("BEER_SIMPLE_BOT", "0") == "1"
 
-# ---------------------------------------------------------------------------
-# Server: per-turn defender poll delay (seconds)
-# ---------------------------------------------------------------------------
-# During each turn the server briefly polls the *non-active* player's socket to
-# detect out-of-turn traffic or disconnects.  The original hard-coded value
-# of 0.1 s adds noticeable latency (≈ 9 s for a 90-shot game).  Make it
-# configurable and default it to **0.0** for maximum throughput.  Integration
-# tests can bump it to e.g. 0.02 if they rely on deterministic interleaving.
 
+# ===========================================================================
+# Server Timing Controls
+# ===========================================================================
+# BEER_SERVER_POLL_DELAY: Delay (in seconds) for the server polling the non-active player's socket.
+#   This is used to detect out-of-turn traffic or disconnects.
+#   Defaults to 0.0 (maximum throughput).
+#   A small value (e.g., 0.02) can make test log interleaving more deterministic.
+#   Example: export BEER_SERVER_POLL_DELAY=0.02
 SERVER_POLL_DELAY: float = float(os.getenv("BEER_SERVER_POLL_DELAY", "0"))
 
-# ---------------------------------------------------------------------------
-# Network defaults (host, port)
-# ---------------------------------------------------------------------------
 
+# ===========================================================================
+# Network Defaults
+# ===========================================================================
+# BEER_HOST: Default host address for the server to bind to and clients to connect to.
+#   Defaults to "127.0.0.1".
+#   Example: export BEER_HOST=0.0.0.0
 DEFAULT_HOST: str = os.getenv("BEER_HOST", "127.0.0.1")
-DEFAULT_PORT: int = int(os.getenv("BEER_PORT", "5000"))
 
-# ---------------------------------------------------------------------------
-# Gameplay timing
-# ---------------------------------------------------------------------------
-# Per-turn timeout for a player to issue a FIRE command (seconds)
+# BEER_PORT: Default port for the server to listen on and clients to connect to.
+#   Defaults to 61337
+#   Note: Port 5000 is used by another process on macOS, using it may cause unexpected behaviour.
+#   Example: export BEER_PORT=5001
+DEFAULT_PORT: int = int(os.getenv("BEER_PORT", "61337"))
 
-TURN_TIMEOUT: int = int(os.getenv("BEER_TURN_TIMEOUT", "180"))  # default 3 min
 
-# Timeout waiting for manual ship placement input (seconds)
+# ===========================================================================
+# Gameplay Timing
+# ===========================================================================
+# BEER_TURN_TIMEOUT: Timeout (in seconds) for a player to issue a FIRE command.
+#   Defaults to 180 (3 minutes).
+#   Example: export BEER_TURN_TIMEOUT=60
+TURN_TIMEOUT: int = int(os.getenv("BEER_TURN_TIMEOUT", "180"))
 
-PLACEMENT_TIMEOUT: int = int(os.getenv("BEER_PLACE_TIMEOUT", "30"))
+# BEER_PLACE_TIMEOUT: Timeout (in seconds) for a player to complete manual ship placement.
+#   Defaults to 30.
+#   Example: export BEER_PLACE_TIMEOUT=60
+PLACEMENT_TIMEOUT: int = int(os.getenv("BEER_PLACE_TIMEOUT", "0"))
 
-# ---------------------------------------------------------------------------
-# Cryptography (optional AES key)
-# ---------------------------------------------------------------------------
 
+# ===========================================================================
+# Cryptography
+# ===========================================================================
+# BEER_KEY: Default AES encryption key (as a hex string) if encryption is enabled.
+#   Defaults to "00112233445566778899AABBCCDDEEFF".
+#   Example: export BEER_KEY=YOUR_SECRET_HEX_KEY
 DEFAULT_KEY_HEX: str = os.getenv("BEER_KEY", "00112233445566778899AABBCCDDEEFF")
 DEFAULT_KEY: bytes = bytes.fromhex(DEFAULT_KEY_HEX)
 
-# ---------------------------------------------------------------------------
-# Game constants (board + ships)
-# ---------------------------------------------------------------------------
 
+# ===========================================================================
+# Game Constants
+# ===========================================================================
+# BEER_BOARD_SIZE: Defines the width and height of the game board.
+#   Defaults to 10 (for a 10x10 grid).
+#   Example: export BEER_BOARD_SIZE=8
 BOARD_SIZE: int = int(os.getenv("BEER_BOARD_SIZE", "10"))
 
+# Standard ship roster: list of (name, size) tuples. Not typically overridden by env vars.
 SHIPS = [
     ("Carrier", 5),
     ("Battleship", 4),
@@ -86,24 +109,31 @@ SHIPS = [
     ("Destroyer", 2),
 ]
 
+# Unique single-letter representations for each ship on the board.
 SHIP_LETTERS = {
-    "Carrier": "A",  # Aircraft carrier (avoid clash with Cruiser)
+    "Carrier": "A",  # "A" for Aircraft carrier to avoid clash with Cruiser's "C"
     "Battleship": "B",
     "Cruiser": "C",
     "Submarine": "S",
     "Destroyer": "D",
 }
 
-# ---------------------------------------------------------------------------
-# Debug / logging
-# ---------------------------------------------------------------------------
 
+# ===========================================================================
+# Debugging and Logging
+# ===========================================================================
+# BEER_DEBUG: If "1", enables detailed debug logging across modules.
+#   Defaults to "0" (disabled).
+#   Example: export BEER_DEBUG=1
 DEBUG: bool = os.getenv("BEER_DEBUG", "0") == "1"
 
-# Comma-separated packet categories that the client/bot should *not* print when
-# DEBUG is disabled.  Can be overridden by `BEER_QUIET="chat,spec_grid"`.
-
+# BEER_QUIET: Comma-separated list of packet categories that the client/bot should *not* print
+#   when BEER_DEBUG is disabled. Effective for reducing log noise.
+#   Defaults to an empty list (all categories printed).
+#   Example: export BEER_QUIET="chat,spec_grid"
 QUIET_CATEGORIES: list[str] = os.getenv("BEER_QUIET", "").split(",") if os.getenv("BEER_QUIET") else []
 
-# Heartbeat interval for server-client communication (seconds)
-HEARTBEAT_INTERVAL: float = float(os.getenv("BEER_HEARTBEAT_INTERVAL", "1"))  # default 1 second
+# BEER_HEARTBEAT_INTERVAL: Interval (in seconds) for server-client keep-alive heartbeats.
+#   Defaults to 1.0.
+#   Example: export BEER_HEARTBEAT_INTERVAL=5.0
+HEARTBEAT_INTERVAL: float = float(os.getenv("BEER_HEARTBEAT_INTERVAL", "1.0"))

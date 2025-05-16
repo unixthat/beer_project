@@ -14,6 +14,7 @@ import threading
 import time
 import logging
 import argparse
+import signal
 
 from .session import GameSession, TOKEN_REGISTRY
 from .common import enable_encryption, DEFAULT_KEY
@@ -105,6 +106,17 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
         server_sock.bind((HOST, PORT))
         server_sock.listen()
 
+        # install graceful shutdown handler (per roadmap ID-5)
+        def _shutdown(signum, frame):
+            # ensure the "C" echo doesn't get stuck on our log line
+            sys.stderr.write("\n")
+            logger.info("Received signal %s, shutting down", signum)
+            server_sock.close()
+            sys.exit(0) 
+
+        signal.signal(signal.SIGINT, _shutdown)
+        signal.signal(signal.SIGTERM, _shutdown)
+
         def _try_pair_lobby():
             nonlocal current_session, session_ready
             while len(lobby) >= 2 and (not current_session or not current_session.is_alive()):
@@ -168,9 +180,7 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
                     while len(lobby) > 0:
                         spectator = lobby.pop(0)
                         current_session.add_spectator(spectator)
-                        print("[DEBUG] Spectator attached from lobby")
-        except KeyboardInterrupt:
-            print("[INFO] Shutting down server (KeyboardInterrupt)")
+                        print("[INFO] Spectator attached from lobby")
         finally:
             for sock in lobby:
                 with contextlib.suppress(Exception):

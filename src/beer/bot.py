@@ -14,6 +14,7 @@ import logging
 import os
 import socket
 import threading
+import time
 from typing import Callable, Dict, Optional
 
 from . import config as _cfg
@@ -69,6 +70,8 @@ class _BotState:
             logger.debug("Fired at %s", coord_txt)
             self.awaiting_result = True
             self.last_shot = coord_txt
+            # Respect configured bot loop delay
+            time.sleep(_cfg.BOT_LOOP_DELAY)
         except Exception as exc:
             logger.error("Failed to write FIRE command: %s", exc)
 

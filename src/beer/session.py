@@ -89,6 +89,8 @@ class GameSession(threading.Thread):
         self.board_p2.place_ships_randomly(self.ships)
         # Registered spectator output streams (read-only clients)
         self.spectator_w_files: list[TextIO] = []
+        # Raw spectator sockets for possible promotion
+        self.spectator_sockets: list[socket.socket] = []
         # Every *half-turn* (i.e. after each individual shot) we increment
         # this counter; spectators receive a full dual-board update after
         # every *two* shots (both players have acted).
@@ -111,6 +113,8 @@ class GameSession(threading.Thread):
 
         # Shot counters per player
         self._shots: dict[int, int] = {1: 0, 2: 0}
+        # Track fired coords to prevent duplicate shots
+        self._fired: dict[int, set[tuple[int,int]]] = {1: set(), 2: set()}
 
         # Event subscribers
         self._subs: List[Callable[[Event], None]] = []
@@ -174,9 +178,6 @@ class GameSession(threading.Thread):
         """Main game-loop executed in its own thread until the match ends."""
         # sourcery skip: low-code-quality
         try:
-            if self.session_ready:
-                self.session_ready.set()  # Signal ready for spectators
-
             # Inform players of their order – P1 starts, include reconnect token
             self._emit(Event(Category.TURN, "start", {"token_p1": self.token_p1, "token_p2": self.token_p2}))
             # Legacy START frames (maintain compatibility during migration)
@@ -194,9 +195,14 @@ class GameSession(threading.Thread):
             # Initial own-fleet views to each player
             self._send_grid(self.p1_file_w, self.board_p1, reveal=True)
             self._send_grid(self.p2_file_w, self.board_p2, reveal=True)
-
-            # Initial spectator snapshot (shot #0)
-            self._send_spec_update()
+            # Initial opponent views so players start with boards
+            self._send_grid(self.p1_file_w, self.board_p2)
+            self._send_grid(self.p2_file_w, self.board_p1)
+            # Skip the first per-turn grid (to avoid duplicate start display)
+            first_turn = True
+            # Now signal ready for spectators (boards are finalized)
+            if self.session_ready:
+                self.session_ready.set()
 
             current_player = 1
 
@@ -208,11 +214,14 @@ class GameSession(threading.Thread):
                     if readable:
                         line = r.readline()
                         if not line:
-                            print(f"[DEBUG] run: disconnect detected on player {idx} before turn")
+                            print(f"[DEBUG] run: disconnect on player {idx}")
+                            # try to keep the session alive
+                            if self._promote_spectator(idx):
+                                continue    # resume the same turn with the new player
+                            # no one to promote → normal conclusion
                             winner = 2 if idx == 1 else 1
                             self._conclude(winner, reason="timeout/disconnect")
                             return
-                        # Ignore any extra line data; disconnect already handled above.
 
                 # Process buffered lines if any
                 self._line_buffer.clear()
@@ -222,18 +231,29 @@ class GameSession(threading.Thread):
                 defender_idx = 2 if current_player == 1 else 1
                 defender_r, defender_w = self._file_pair(defender_idx)
 
-                # Send the attacker their current opponent grid view
-                self._send_grid(attacker_w, defender_board)
+                # Send the attacker their current opponent grid view (skip on first turn)
+                if first_turn:
+                    first_turn = False
+                else:
+                    self._send_grid(attacker_w, defender_board)
                 # Request coordinate (do NOT mirror to spectators)
                 self._send(attacker_w, "INFO Your turn – FIRE <coord> or QUIT", mirror_spec=False)
                 self._emit(Event(Category.TURN, "prompt", {"player": current_player}))
 
                 coord = self._receive_coord(attacker_r, attacker_w, defender_r, defender_w)
                 if coord == "DEFENDER_LEFT":
+                    # defender (spectating or playing) dropped mid-turn → try promote
+                    if self._promote_spectator(defender_idx):
+                        continue     # resume same turn with new defender
+                    # no one left → end match
                     winner = 2 if current_player == 1 else 1
                     self._conclude(winner, reason="timeout/disconnect")
                     return
                 if coord is None:
+                    # attacker disconnected mid-turn → try promote
+                    if self._promote_spectator(current_player):
+                        continue     # resume same turn with new attacker
+                    # no one left → end match
                     winner = 2 if current_player == 1 else 1
                     self._conclude(winner, reason="timeout/disconnect")
                     return
@@ -244,7 +264,16 @@ class GameSession(threading.Thread):
                     return
 
                 row, col = coord  # tuple[int, int]
-                # (Spectators no longer receive per-shot messages.)
+                # Prevent duplicate shots: check if this player already fired here
+                key = (row, col)
+                if key in self._fired[current_player]:
+                    self._send(
+                        attacker_w,
+                        f"ERR Already fired at {self._coord_str(row, col)}, choose another",
+                        mirror_spec=False,
+                    )
+                    continue  # re-prompt same player
+                self._fired[current_player].add(key)
 
                 # Peek ship letter before firing to identify which ship was hit (server console only)
                 orig_cell = defender_board.hidden_grid[row][col]
@@ -301,6 +330,10 @@ class GameSession(threading.Thread):
                     self._conclude(winner, reason="timeout/disconnect")
                     return
 
+                # Also send updated opponent views immediately
+                self._send_grid(self.p1_file_w, self.board_p2)
+                self._send_grid(self.p2_file_w, self.board_p1)
+
                 # After each turn, check for disconnects on the non-turn player
                 non_turn_player = 2 if current_player == 1 else 1
                 non_turn_r, non_turn_w = self._file_pair(non_turn_player)
@@ -313,6 +346,10 @@ class GameSession(threading.Thread):
                         line = non_turn_r.readline()
                         if not line:
                             print(f"[DEBUG] run: disconnect detected on player {non_turn_player} after turn (readline)")
+                            # Try to promote a spectator into the vacant slot
+                            if self._promote_spectator(non_turn_player):
+                                continue  # resume this turn with the new player
+                            # No one left to promote → end the game
                             self._conclude(current_player, reason="timeout/disconnect")
                             return
                         # Ignore extra data read during poll – next turn will handle.
@@ -460,10 +497,58 @@ class GameSession(threading.Thread):
         with self._lock:
             wfile = sock.makefile("w")
             self.spectator_w_files.append(wfile)
-            # Welcome message – no mirroring so we avoid a duplicate.
-            self._send(wfile, "YOU ARE SPECTATING")
-            print("[DEBUG] Spectator attached", flush=True)  # Log for test harness
-            self._emit(Event(Category.SYSTEM, "spectator_join", {}))
+            self.spectator_sockets.append(sock)
+            # Advise the new spectator
+            self._send(wfile, "[INFO] YOU ARE NOW SPECTATING", mirror_spec=False)
+            # Immediately send them the current spec-board snapshot
+            self._send_spec_update()
+
+    def _promote_spectator(self, slot: int) -> bool:
+        """Replace a disconnected player (1 or 2) with the next spectator."""
+        with self._lock:
+            if not self.spectator_sockets:
+                return False
+            new_sock = self.spectator_sockets.pop(0)
+            # Attach to the right player slot
+            if slot == 1:
+                self.p1_sock = new_sock
+                self.p1_file_r = new_sock.makefile("r")
+                self.p1_file_w = new_sock.makefile("w")
+                print(f"[INFO] Spectator promoted to Player {slot}")
+                board, wfile = self.board_p1, self.p1_file_w
+            else:
+                self.p2_sock = new_sock
+                self.p2_file_r = new_sock.makefile("r")
+                self.p2_file_w = new_sock.makefile("w")
+                print(f"[INFO] Spectator promoted to Player {slot}")
+                board, wfile = self.board_p2, self.p2_file_w
+
+            # Advise the promoted client…
+            self._send(wfile, "[INFO] YOU ARE NOW PLAYING", mirror_spec=False)
+
+            # Reset everything for a brand-new match
+            self.board_p1 = Board()
+            self.board_p2 = Board()
+            self.board_p1.place_ships_randomly(self.ships)
+            self.board_p2.place_ships_randomly(self.ships)
+
+            # Legacy START frames (kick off match, include reconnect tokens)
+            self._send(self.p1_file_w, f"START you {self.token_p1}")
+            self._send(self.p2_file_w, f"START opp {self.token_p2}")
+
+            # Optional manual placement for both players
+            t1 = threading.Thread(target=self._handle_ship_placement, args=(1,), daemon=True)
+            t2 = threading.Thread(target=self._handle_ship_placement, args=(2,), daemon=True)
+            t1.start(); t2.start()
+            t1.join(); t2.join()
+
+            # Send each player their fresh own-fleet grids
+            self._send_grid(self.p1_file_w, self.board_p1, reveal=True)
+            self._send_grid(self.p2_file_w, self.board_p2, reveal=True)
+
+            # Send an initial spectator snapshot
+            self._send_spec_update()
+            return True
 
     # ---------------- reconnect API -----------------
     def attach_player(self, token: str, sock: socket.socket) -> bool:
@@ -489,7 +574,7 @@ class GameSession(threading.Thread):
         opp_w = self.p2_file_w if player_idx == 1 else self.p1_file_w
 
         # Ask preference (no wait message to opponent)
-        self._send(w, "INFO Manual placement? [Y/n]")
+        self._send(w, "INFO Manual placement? [y/N]")
 
         # Temporarily set small timeout so tests/non-interactive clients proceed automatically
         sock_pref: socket.socket = r.buffer.raw._sock  # type: ignore[attr-defined]
@@ -500,10 +585,9 @@ class GameSession(threading.Thread):
             choice_line = ""
         finally:
             sock_pref.settimeout(None)
-        choice = choice_line.strip().upper() if choice_line else "N"
-
-        if choice and choice.startswith("N"):
-            return  # keep random placement already done in __init__
+        raw = choice_line.strip().upper() if choice_line else ""
+        if not raw.startswith("Y"):
+            return  # default: keep random placement
 
         # Replace randomly pre-populated board with a fresh empty one
         new_board = Board()
@@ -579,7 +663,7 @@ class GameSession(threading.Thread):
         each full round) plus an initial frame before the first turn.
         """
         # Send spec-grid to both players and any connected spectators
-        recipients = [self.p1_file_w, self.p2_file_w] + list(self.spectator_w_files)
+        recipients = list(self.spectator_w_files)
         if not recipients:
             return
 

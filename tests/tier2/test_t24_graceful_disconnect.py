@@ -1,5 +1,4 @@
 import pytest
-pytest.skip("T2.4 superseded by Tier-3 reconnect logic; handled in Tier-3 tests", allow_module_level=True)
 
 import time
 from tests.conftest import read_log_until
@@ -20,8 +19,8 @@ def test_t24_graceful_disconnect(beer_server, beer_bot_factory):
 
     try:
         # Wait for both bots to be ready (look for SHOT as first sign of play)
-        start1 = read_log_until(log1, r"SHOT", timeout=6)
-        start2 = read_log_until(log2, r"SHOT", timeout=6)
+        start1 = read_log_until(log1, r"SHOT", timeout=8)
+        start2 = read_log_until(log2, r"SHOT", timeout=8)
         assert start1 is not None, "Bot 1 did not start"
         assert start2 is not None, "Bot 2 did not start"
 

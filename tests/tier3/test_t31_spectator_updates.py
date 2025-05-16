@@ -14,21 +14,35 @@ def test_t31_spectator_receives_updates(beer_server, beer_bot_factory, tmp_path)
     server_proc, port = beer_server
     launch_bot = beer_bot_factory
 
-    bot1, log1 = launch_bot(port, logfile_name="bot1_t31.log")
-    bot2, log2 = launch_bot(port, logfile_name="bot2_t31.log")
+    # Slow down bots so spectator has time to join
+    bot1, log1 = launch_bot(port, env_overrides={"BEER_BOT_DELAY": "1.0"}, logfile_name="bot1_t31.log")
+    bot2, log2 = launch_bot(port, env_overrides={"BEER_BOT_DELAY": "1.0"}, logfile_name="bot2_t31.log")
+
+
 
     # Wait for game to start before connecting spectator
     shot1 = read_log_until(log1, r"SHOT", timeout=8)
     shot2 = read_log_until(log2, r"SHOT", timeout=8)
     assert shot1 and shot2, "Players did not start game"
+    bot3, log3 = launch_bot(
+        port,
+        extra_args=["--verbose"],
+        env_overrides={"BEER_BOT_DELAY": "0.05"},
+        logfile_name="bot3_t31.log"
+        )  # spectator
 
-    bot3, log3 = launch_bot(port, logfile_name="bot3_t31.log")  # spectator
 
     try:
         # Server log should record spectator attachment
         server_log = tmp_path / "server.log"
-        spect_entry = read_log_until(server_log, r"Spectator attached", timeout=5)
+        assert server_log is not None, "Server log did not exist"
+        spect_entry = read_log_until(server_log, r"Spectator attached from lobby", timeout=5)
         assert spect_entry is not None, "Server did not log spectator attachment"
+    except Exception:
+        with open(server_log) as f:
+            print("\n=== Server log ===\n" + f.read())
+        raise
+    try:
         collect_lines(log3, timeout=5)  # wait to accumulate
         with open(log3) as f:
             lines3 = f.readlines()

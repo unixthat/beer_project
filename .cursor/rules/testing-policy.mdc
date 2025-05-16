@@ -1,7 +1,7 @@
 ---
 description:
 globs:
-alwaysApply: true
+alwaysApply: false
 ---
 # Testing & Coverage Rule
 Focus on one test at a time. Only debug and run one test, until it passes, then immediately, without prompting me, move on to the next test.
