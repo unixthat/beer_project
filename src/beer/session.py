@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import contextlib
 import re
-import secrets
 import socket
 import threading
 import time
@@ -50,14 +49,11 @@ from .events import Event, Category
 COORD_RE = re.compile(r"^[A-J](10|[1-9])$")  # Valid 10×10 coords
 TURN_TIMEOUT = _cfg.TURN_TIMEOUT  # seconds
 
-# Global registry mapping reconnect tokens → ongoing GameSession
-TOKEN_REGISTRY: dict[str, "GameSession"] = {}
-
 
 class GameSession(threading.Thread):
     """Thread managing a single two-player match."""
 
-    def __init__(self, p1: socket.socket, p2: socket.socket, *, ships=None, session_ready=None):
+    def __init__(self, p1: socket.socket, p2: socket.socket, *, token_p1: str, token_p2: str, ships=None, session_ready=None):
         """Create a thread that manages a full two-player match.
 
         Args:
@@ -98,11 +94,13 @@ class GameSession(threading.Thread):
         self._lock = threading.Lock()
         self._seq = 0
 
-        # Reconnect support (Tier 3)
-        self.token_p1 = secrets.token_hex(4)
-        self.token_p2 = secrets.token_hex(4)
-        TOKEN_REGISTRY[self.token_p1] = self
-        TOKEN_REGISTRY[self.token_p2] = self
+        # Reconnect support (Tier 3) using PID tokens
+        self.token_p1 = token_p1
+        self.token_p2 = token_p2
+        # Register session for PID-token reconnect
+        from .server import PID_REGISTRY
+        PID_REGISTRY[self.token_p1] = self
+        PID_REGISTRY[self.token_p2] = self
 
         self._event_p1 = threading.Event()
         self._event_p2 = threading.Event()
@@ -199,6 +197,35 @@ class GameSession(threading.Thread):
         if self.session_ready:
             self.session_ready.set()
 
+    # ---------------- reconnect wait helper --------------------
+    def _await_reconnect(self, slot: int) -> bool:
+        """
+        Notify survivor, then wait up to RECONNECT_TIMEOUT for re-attach.
+        Returns True if original player reattached in time.
+        """
+        other_idx = 2 if slot == 1 else 1
+        other_w = self.p2_file_w if slot == 1 else self.p1_file_w
+        evt = self._event_p1 if slot == 1 else self._event_p2
+
+        # Inform the survivor
+        self._send(
+            other_w,
+            f"INFO Opponent disconnected – holding slot for {_cfg.RECONNECT_TIMEOUT}s",
+            mirror_spec=False,
+        )
+
+        # Wait for reconnect
+        reattached = evt.wait(timeout=_cfg.RECONNECT_TIMEOUT)
+        if reattached:
+            # Acknowledge rejoin
+            self._send(other_w, "INFO Opponent has reconnected – resuming match", mirror_spec=False)
+            new_w = self.p1_file_w if slot == 1 else self.p2_file_w
+            self._send(new_w, "INFO You have reconnected – resuming match", mirror_spec=False)
+            evt.clear()
+            return True
+
+        return False
+
     # -------------------- gameplay --------------------
     def run(self) -> None:  # noqa: C901 complexity – fine for server thread
         """Main game-loop executed in its own thread until the match ends."""
@@ -218,9 +245,12 @@ class GameSession(threading.Thread):
                         line = r.readline()
                         if not line:
                             print(f"[DEBUG] run: disconnect on player {idx}")
-                            # try to keep the session alive
+                            # allow a reconnect window first
+                            if self._await_reconnect(idx):
+                                continue    # original player rejoined
+                            # then try to promote a spectator
                             if self._promote_spectator(idx):
-                                continue    # resume the same turn with the new player
+                                continue    # resume the same turn with new player
                             # no one to promote → normal conclusion
                             winner = 2 if idx == 1 else 1
                             self._conclude(winner, reason="timeout/disconnect")
@@ -248,7 +278,10 @@ class GameSession(threading.Thread):
 
                 coord = self._receive_coord(attacker_r, attacker_w, defender_r, defender_w)
                 if coord == "DEFENDER_LEFT":
-                    # defender (spectating or playing) dropped mid-turn → try promote
+                    # defender dropped mid-turn → try reconnect first
+                    if self._await_reconnect(defender_idx):
+                        continue     # original defender rejoined
+                    # otherwise try to promote a spectator
                     if self._promote_spectator(defender_idx):
                         continue     # resume same turn with new defender
                     # no one left → end match
@@ -256,7 +289,10 @@ class GameSession(threading.Thread):
                     self._conclude(winner, reason="timeout/disconnect")
                     return
                 if coord is None:
-                    # attacker disconnected mid-turn → try promote
+                    # attacker disconnected mid-turn → try reconnect first
+                    if self._await_reconnect(current_player):
+                        continue     # original attacker rejoined
+                    # otherwise try to promote a spectator
                     if self._promote_spectator(current_player):
                         continue     # resume same turn with new attacker
                     # no one left → end match
@@ -352,6 +388,9 @@ class GameSession(threading.Thread):
                         line = non_turn_r.readline()
                         if not line:
                             print(f"[DEBUG] run: disconnect detected on player {non_turn_player} after turn (readline)")
+                            # allow reconnect first
+                            if self._await_reconnect(non_turn_player):
+                                continue  # resume same turn if original player rejoined
                             # Try to promote a spectator into the vacant slot
                             if self._promote_spectator(non_turn_player):
                                 continue  # resume this turn with the new player
@@ -379,6 +418,10 @@ class GameSession(threading.Thread):
 
             # One last board dump for any connected spectators.
             self._send_spec_update()
+            # Cleanup PID_REGISTRY entries
+            from .server import PID_REGISTRY
+            PID_REGISTRY.pop(self.token_p1, None)
+            PID_REGISTRY.pop(self.token_p2, None)
 
     # -------------------- internal utilities --------------------
     def _select_players(self, current: int):

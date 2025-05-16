@@ -15,8 +15,10 @@ import time
 import logging
 import argparse
 import signal
+from typing import Optional
+import itertools
 
-from .session import GameSession, TOKEN_REGISTRY
+from .session import GameSession
 from .common import enable_encryption, DEFAULT_KEY
 from .battleship import SHIPS
 from . import config as _cfg
@@ -30,6 +32,12 @@ PORT = _cfg.DEFAULT_PORT
 # Optional single-ship mode
 ONE_SHIP_LIST = [("Carrier", 5)]
 USE_ONE_SHIP = False
+
+# Registry for PID-based reconnect tokens
+PID_REGISTRY: dict[str, GameSession] = {}
+
+# Global PID token counter for new matches
+_pid_counter = itertools.count(100000)
 
 # Initialize module-level logger
 logger = logging.getLogger(__name__)
@@ -97,7 +105,8 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
     _parse_cli_flags(sys.argv)
 
     print(f"[INFO] BEER server listening on {HOST}:{PORT}")
-    lobby: list[socket.socket] = []
+    # lobby holds tuples of (conn, reconnect_token) where token is PID-token or None
+    lobby: list[tuple[socket.socket, Optional[str]]] = []
     current_session: GameSession | None = None
     session_ready = threading.Event()
 
@@ -112,7 +121,7 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
             sys.stderr.write("\n")
             logger.info("Received signal %s, shutting down", signum)
             server_sock.close()
-            sys.exit(0) 
+            sys.exit(0)
 
         signal.signal(signal.SIGINT, _shutdown)
         signal.signal(signal.SIGTERM, _shutdown)
@@ -120,26 +129,32 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
         def _try_pair_lobby():
             nonlocal current_session, session_ready
             while len(lobby) >= 2 and (not current_session or not current_session.is_alive()):
-                p1 = lobby.pop(0)
-                p2 = lobby.pop(0)
+                (c1, token1) = lobby.pop(0)
+                (c2, token2) = lobby.pop(0)
                 print("[INFO] Launching new game session")
                 ships_list = ONE_SHIP_LIST if USE_ONE_SHIP else SHIPS
                 session_ready.clear()
-                current_session = GameSession(p1, p2, ships=ships_list, session_ready=session_ready)
+                # Generate or reuse PID-tokens
+                t1 = token1 or f"PID{next(_pid_counter)}"
+                t2 = token2 or f"PID{next(_pid_counter)}"
+                # Register in PID_REGISTRY
+                current_session = GameSession(c1, c2, ships=ships_list, token_p1=t1, token_p2=t2, session_ready=session_ready)
+                PID_REGISTRY[t1] = current_session
+                PID_REGISTRY[t2] = current_session
 
                 # Temporary event router – converts to debug log for now.
                 router = EventRouter(current_session)
                 current_session.subscribe(router)
-
+                # Monitor and loop
                 def _monitor_session(sess: GameSession) -> None:
                     sess.join()
                     if sess.winner is not None:
                         print(f"[INFO] Match completed – P{sess.winner} won by {sess.win_reason}.")
                     print("[INFO] Waiting for new players…")
-                    _try_pair_lobby()  # Try to pair again after this game ends
+                    _try_pair_lobby()
 
                 current_session.start()
-                session_ready.wait()  # Wait until session signals ready for spectators
+                session_ready.wait()
                 threading.Thread(target=_monitor_session, args=(current_session,), daemon=True).start()
 
         # Heartbeat disabled – rely on TCP disconnects instead
@@ -149,40 +164,36 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
                 # Accept new connection (blocking)
                 conn, addr = server_sock.accept()
                 print(f"[INFO] Client connected from {addr}")
-
-                # Try to read first line (non-blocking small timeout) to detect TOKEN reconnect.
-                conn.settimeout(2)
+                # ---------------- reconnect handshake ----------------
+                conn.settimeout(_cfg.RECONNECT_HANDSHAKE_TIMEOUT)
+                rfile = conn.makefile("r")
                 try:
-                    first_bytes = conn.recv(64, socket.MSG_PEEK)
+                    first_line = rfile.readline(64).strip()
                 except Exception:
-                    first_bytes = b""
-                conn.settimeout(None)
-
-                if first_bytes.startswith(b"TOKEN "):
-                    rfile = conn.makefile("r")
-                    token_line = rfile.readline().strip()
-                    token = token_line.split()[1] if len(token_line.split()) > 1 else ""
-                    session = TOKEN_REGISTRY.get(token)
+                    first_line = ""
+                finally:
+                    conn.settimeout(None)
+                print(f"[DEBUG] Handshake saw: {first_line!r}")
+                # Handle optional PID-token reconnect handshake
+                token: Optional[str] = None
+                if first_line.upper().startswith("TOKEN "):
+                    token = first_line.split()[1] if len(first_line.split()) > 1 else None
+                    session = PID_REGISTRY.get(token)
                     if session and session.attach_player(token, conn):
-                        print("[INFO] Reattached player via token")
-                    else:
-                        conn.close()
-                        print("[WARN] Invalid reconnect token—connection dropped")
-                    continue
-
-                # Always append to lobby
-                lobby.append(conn)
+                        print("[INFO] Reattached via PID-token")
+                        continue
+                # New or unrecognized token → add to lobby (token drives pairing if present)
+                lobby.append((conn, token))
                 print(f"[DEBUG] Client added to lobby (len={len(lobby)})")
                 _try_pair_lobby()
 
-                # After pairing, attach all extra clients as spectators
                 if current_session and current_session.is_alive() and session_ready.is_set():
-                    while len(lobby) > 0:
-                        spectator = lobby.pop(0)
-                        current_session.add_spectator(spectator)
+                    while lobby:
+                        sock, _ = lobby.pop(0)
+                        current_session.add_spectator(sock)
                         print("[INFO] Spectator attached from lobby")
         finally:
-            for sock in lobby:
+            for sock, _ in lobby:
                 with contextlib.suppress(Exception):
                     sock.shutdown(socket.SHUT_RDWR)
                 sock.close()

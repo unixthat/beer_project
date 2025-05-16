@@ -81,6 +81,18 @@ TURN_TIMEOUT: int = int(os.getenv("BEER_TURN_TIMEOUT", "180"))
 #   Example: export BEER_PLACE_TIMEOUT=60
 PLACEMENT_TIMEOUT: int = int(os.getenv("BEER_PLACE_TIMEOUT", "0"))
 
+# ===========================================================================
+# Reconnect Window
+# ===========================================================================
+# BEER_RECONNECT_TIMEOUT: How many seconds to wait for a dropped player to re-attach.
+#   Defaults to 60.
+#   Example: export BEER_RECONNECT_TIMEOUT=120
+RECONNECT_TIMEOUT: int = int(os.getenv("BEER_RECONNECT_TIMEOUT", "60"))
+
+# How long the server waits (seconds) for the very first line on a fresh TCP
+# connection – gives reconnecting clients time to transmit "TOKEN <hex>".
+RECONNECT_HANDSHAKE_TIMEOUT: int = int(os.getenv("BEER_HANDSHAKE_TIMEOUT", "5"))
+
 
 # ===========================================================================
 # Cryptography

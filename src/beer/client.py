@@ -10,6 +10,7 @@ from typing import TextIO, Optional, Callable, Dict
 import os
 import logging
 import time
+from pathlib import Path
 
 from .common import (
     PacketType,
@@ -30,6 +31,13 @@ logging.basicConfig(level=logging.DEBUG if _cfg.DEBUG else logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
+# ------------------- PID-token persistence -------------------
+TOKEN_FILE = Path.home() / ".beer_pidtoken"
+if TOKEN_FILE.exists():
+    TOKEN = TOKEN_FILE.read_text().strip()
+else:
+    TOKEN = f"PID{os.getpid()}"
+    TOKEN_FILE.write_text(TOKEN)
 
 # ---------------------------- receiver -----------------------------
 
@@ -169,6 +177,11 @@ def _recv_loop(sock: socket.socket, stop_evt: threading.Event, verbose: int) -> 
             print(f"YOU WON with {shots} shots")
         else:
             print(f"YOU LOST – opponent won with {shots} shots")
+        # Clean up PID-token cache after match conclusion
+        try:
+            TOKEN_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
 
     handlers: Dict[str, Callable[[dict], None]] = {
         "spec_grid": h_spec_grid,
@@ -203,11 +216,11 @@ def _recv_loop(sock: socket.socket, stop_evt: threading.Event, verbose: int) -> 
                 if p in handlers:
                     handlers[p](obj)
                 else:
-                    # Fallback: server text (INFO/ERR) and raw frames
+                    # Fallback: server text (START/INFO/ERR) and raw frames
                     msg = obj.get("msg", "")
                     if not msg:
                         continue
-                    # INFO messages always shown at default verbosity
+                    # INFO and ERR messages always shown
                     if msg.startswith("INFO ") or msg.startswith("ERR ") or msg.startswith("[INFO] "):
                         print(f"\r{msg}")
                     # Raw/unrecognized frames at verbose>=1
@@ -281,6 +294,11 @@ def _client(s, args):
     while True:
         try:
             s.connect(addr)
+            # Send PID-token handshake immediately
+            try:
+                s.sendall(f"TOKEN {TOKEN}\n".encode())
+            except Exception:
+                pass
             print(f"[INFO] Connected to server at {addr}", flush=True)
             break
         except KeyboardInterrupt:

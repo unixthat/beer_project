@@ -18,3 +18,5 @@ This document summarizes the effect of command-line flags on BEER tools.
 > - `verbosity >= 0`: grid, shot, chat.
 > - `verbosity >= 1`: raw fallback messages.
 > - `verbosity >= 2`: spec-grid frames.
+
+**Transparent reconnect**: The client caches a PID-based token in `~/.beer_pidtoken` and automatically sends `TOKEN <PID>` when connecting. If you restart `beer-client` in the same terminal within the 60-second reconnect window, it will resume your previous session.
