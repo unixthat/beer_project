@@ -137,6 +137,8 @@ class GameSession(threading.Thread):
 
         # Added for the new run method
         self._line_buffer: dict[int, str] = {}
+        # Keeps track of whose turn it is (1 or 2); set properly in run()
+        self.current: int | None = None
 
     # -------------------- helpers --------------------
     # Removed duplicate _send and _send_grid methods; using io_utils.send and send_grid directly
@@ -212,6 +214,7 @@ class GameSession(threading.Thread):
             # Start the first match handshake
             self._begin_match()
             current_player = 1
+            self.current = current_player
 
             while True:
                 # Poll both sockets for disconnect before each turn (handle simultaneous drops)
@@ -357,6 +360,7 @@ class GameSession(threading.Thread):
 
                 # Next player's turn
                 current_player = 2 if current_player == 1 else 1
+                self.current = current_player
         finally:
             # One last board snapshot for any connected spectators.
             self.spec.snapshot(self.board_p1, self.board_p2)
@@ -377,7 +381,38 @@ class GameSession(threading.Thread):
             self.p2_sock = sock
             self.p2_file_r = sock.makefile("r")
             self.p2_file_w = sock.makefile("w")
-        # Notify session ready if needed
+
+        # After rebinding, push the current boards to the re-attached player.
+        self._sync_state(slot)
+
+        # … and, if it's still the *other* player's turn, remind them to shoot
+        other_slot = 2 if slot == 1 else 1
+        if self.current == other_slot:  # shooter is waiting
+            attacker_w = self.p1_file_w if other_slot == 1 else self.p2_file_w
+            self._notify(attacker_w, "INFO Your turn – FIRE <coord> or QUIT")
+
+    # ------------------------------------------------------------
+    # helper: push fresh boards to a just-reconnected player
+    # ------------------------------------------------------------
+    def _sync_state(self, slot: int) -> None:
+        """
+        Send two GRID frames to the client that has just re-attached:
+
+        • first – their own fleet view (ships revealed)
+        • second – fog-of-war view of the opponent
+
+        `self.io_seq` is bumped for each frame so spectators stay in sync.
+        """
+        from .io_utils import send_grid  # local import avoids cycle
+
+        writer = self.p1_file_w if slot == 1 else self.p2_file_w
+        own = self.board_p1 if slot == 1 else self.board_p2
+        opp = self.board_p2 if slot == 1 else self.board_p1
+
+        send_grid(writer, self.io_seq, own, reveal=True)
+        self.io_seq += 1
+        send_grid(writer, self.io_seq, opp, reveal=False)
+        self.io_seq += 1
 
     def _select_players(self, current: int):
         if current == 1:

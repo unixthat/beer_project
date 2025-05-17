@@ -117,7 +117,13 @@ def _prompt() -> None:
     print(">> ", end="", flush=True)
 
 
+# Flag that controls whether the main loop has shown the ">> " prompt
+_prompt_shown = False
+
+
 def _recv_loop(sock: socket.socket, stop_evt: threading.Event, verbose: int) -> None:  # pragma: no cover
+    global _prompt_shown
+
     """Continuously print messages from the server (framed packets only)."""
     global TOKEN
     br = sock.makefile("rb")  # buffered reader
@@ -239,6 +245,9 @@ def _recv_loop(sock: socket.socket, stop_evt: threading.Event, verbose: int) -> 
                         or msg.startswith("[INFO] ")
                     ):
                         print(f"\r{msg}")
+                        # Reset prompt when the shooter should act again
+                        if msg.startswith("INFO Your turn") or msg.startswith("INFO Opponent has reconnected"):
+                            _prompt_shown = False
                         continue
                     # Raw/unrecognized frames at verbose>=1
                     if verbose >= 1 and "raw" not in _cfg.QUIET_CATEGORIES:
@@ -306,6 +315,8 @@ def main() -> None:  # pragma: no cover – CLI entry
 
 # Internal client loop invoked from main
 def _client(s, args):
+    global _prompt_shown
+
     addr = (args.host, args.port)
     # Retry loop: once-per-second until connected or interrupted
     while True:
@@ -352,7 +363,7 @@ def _client(s, args):
             import sys
             import select
 
-            if not locals().get("_prompt_shown", False):
+            if not _prompt_shown:
                 _prompt()
                 _prompt_shown = True  # type: ignore[var-annotated]
 
