@@ -138,7 +138,7 @@ def send_pkt(w: BufferedWriter, ptype: PacketType, seq: int, obj: Any) -> None:
     w.flush()
 
 
-def recv_pkt(r: BufferedReader):
+def recv_pkt(r: BufferedReader) -> Tuple[PacketType, int, Any]:
     """Blocking helper that returns the next `(ptype, seq, obj)` tuple from *r*."""
     return unpack(r)
 

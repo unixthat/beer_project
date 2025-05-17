@@ -91,7 +91,8 @@ RECONNECT_TIMEOUT: int = int(os.getenv("BEER_RECONNECT_TIMEOUT", "60"))
 
 # How long the server waits (seconds) for the very first line on a fresh TCP
 # connection – gives reconnecting clients time to transmit "TOKEN <hex>".
-RECONNECT_HANDSHAKE_TIMEOUT: int = int(os.getenv("BEER_HANDSHAKE_TIMEOUT", "5"))
+# Default to 0 for immediate lobby join; override via BEER_HANDSHAKE_TIMEOUT if needed.
+RECONNECT_HANDSHAKE_TIMEOUT: float = float(os.getenv("BEER_HANDSHAKE_TIMEOUT", "0"))
 
 
 # ===========================================================================

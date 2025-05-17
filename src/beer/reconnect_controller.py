@@ -1,0 +1,64 @@
+"""ReconnectController: manage reconnect wait window and token-based reattachment for two-player slots."""
+import threading
+import socket
+from typing import Callable, Dict
+
+class ReconnectController:
+    """
+    Handles per-slot reconnect windows and token-based reattachment.
+    """
+
+    def __init__(
+        self,
+        timeout: float,
+        notify_fn: Callable[[int, str], None],
+        token1: str,
+        token2: str,
+        registry: Dict[str, 'ReconnectController'],
+    ):
+        self.timeout = timeout
+        self.notify_fn = notify_fn
+        self.token1 = token1
+        self.token2 = token2
+        self.registry = registry
+        self.events = {1: threading.Event(), 2: threading.Event()}
+        self.new_sockets: Dict[int, socket.socket] = {}
+        # Register for reconnect tokens
+        registry[token1] = self
+        registry[token2] = self
+
+    def wait(self, slot: int) -> bool:
+        """
+        Notify the survivor and wait up to timeout for reattachment.
+        Returns True if the original player reattached in time.
+        """
+        other = 2 if slot == 1 else 1
+        # Notify the surviving player that we're holding the slot
+        self.notify_fn(other, f"INFO Opponent disconnected – holding slot for {self.timeout}s")
+        evt = self.events[slot]
+        reattached = evt.wait(timeout=self.timeout)
+        if reattached:
+            # Acknowledge rejoin to both sides
+            self.notify_fn(other, "INFO Opponent has reconnected – resuming match")
+            self.notify_fn(slot, "INFO You have reconnected – resuming match")
+            evt.clear()
+        return reattached
+
+    def attach_player(self, token: str, sock: socket.socket) -> bool:
+        """
+        Attach a reconnecting player by token; returns True on success.
+        """
+        if token == self.token1:
+            slot = 1
+        elif token == self.token2:
+            slot = 2
+        else:
+            return False
+        # Store new socket and signal waiters
+        self.new_sockets[slot] = sock
+        self.events[slot].set()
+        return True
+
+    def take_new_socket(self, slot: int) -> socket.socket:
+        """Retrieve and remove the new socket for the given slot."""
+        return self.new_sockets.pop(slot)

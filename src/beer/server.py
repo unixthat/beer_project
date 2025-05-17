@@ -19,6 +19,7 @@ from typing import Optional
 import itertools
 
 from .session import GameSession
+from .reconnect_controller import ReconnectController
 from .common import enable_encryption, DEFAULT_KEY
 from .battleship import SHIPS
 from . import config as _cfg
@@ -33,14 +34,14 @@ PORT = _cfg.DEFAULT_PORT
 ONE_SHIP_LIST = [("Carrier", 5)]
 USE_ONE_SHIP = False
 
-# Registry for PID-based reconnect tokens
-PID_REGISTRY: dict[str, GameSession] = {}
-
 # Global PID token counter for new matches
 _pid_counter = itertools.count(100000)
 
 # Initialize module-level logger
 logger = logging.getLogger(__name__)
+
+# Registry for PID-based reconnect tokens (maps token to ReconnectController)
+PID_REGISTRY: dict[str, ReconnectController] = {}
 
 
 def _parse_cli_flags(argv: list[str]) -> None:
@@ -137,10 +138,8 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
                 # Generate or reuse PID-tokens
                 t1 = token1 or f"PID{next(_pid_counter)}"
                 t2 = token2 or f"PID{next(_pid_counter)}"
-                # Register in PID_REGISTRY
+                # Instantiate session (ReconnectController inside will register tokens)
                 current_session = GameSession(c1, c2, ships=ships_list, token_p1=t1, token_p2=t2, session_ready=session_ready)
-                PID_REGISTRY[t1] = current_session
-                PID_REGISTRY[t2] = current_session
 
                 # Temporary event router – converts to debug log for now.
                 router = EventRouter(current_session)
@@ -148,8 +147,24 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
                 # Monitor and loop
                 def _monitor_session(sess: GameSession) -> None:
                     sess.join()
-                    if sess.winner is not None:
-                        print(f"[INFO] Match completed – P{sess.winner} won by {sess.win_reason}.")
+                    # Report match result
+                    winner = sess.winner or 0
+                    reason = sess.win_reason or ""
+                    print(f"[INFO] Match completed – P{winner} won by {reason}.")
+                    # Determine winner and loser sockets/tokens
+                    if winner == 1:
+                        w_sock, w_tok = sess.p1_sock, sess.token_p1
+                        l_sock, l_tok = sess.p2_sock, sess.token_p2
+                    else:
+                        w_sock, w_tok = sess.p2_sock, sess.token_p2
+                        l_sock, l_tok = sess.p1_sock, sess.token_p1
+                    # After game end, close both client sockets to clean up
+                    with contextlib.suppress(Exception):
+                        w_sock.shutdown(socket.SHUT_RDWR)
+                        w_sock.close()
+                    with contextlib.suppress(Exception):
+                        l_sock.shutdown(socket.SHUT_RDWR)
+                        l_sock.close()
                     print("[INFO] Waiting for new players…")
                     _try_pair_lobby()
 
@@ -175,22 +190,25 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
                     conn.settimeout(None)
                 print(f"[DEBUG] Handshake saw: {first_line!r}")
                 # Handle optional PID-token reconnect handshake
-                token: Optional[str] = None
                 if first_line.upper().startswith("TOKEN "):
-                    token = first_line.split()[1] if len(first_line.split()) > 1 else None
-                    session = PID_REGISTRY.get(token)
-                    if session and session.attach_player(token, conn):
-                        print("[INFO] Reattached via PID-token")
-                        continue
+                    parts = first_line.split()
+                    token_str = parts[1] if len(parts) > 1 else None
+                    if token_str is not None:
+                        ctrl = PID_REGISTRY.get(token_str)
+                        # Delegate attach to ReconnectController
+                        if ctrl and ctrl.attach_player(token_str, conn):
+                            print("[INFO] Reattached via PID-token")
+                            continue
                 # New or unrecognized token → add to lobby (token drives pairing if present)
-                lobby.append((conn, token))
+                lobby.append((conn, token_str))
                 print(f"[DEBUG] Client added to lobby (len={len(lobby)})")
                 _try_pair_lobby()
 
                 if current_session and current_session.is_alive() and session_ready.is_set():
+                    # Attach any waiting sockets as spectators
                     while lobby:
                         sock, _ = lobby.pop(0)
-                        current_session.add_spectator(sock)
+                        current_session.spec.add(sock)
                         print("[INFO] Spectator attached from lobby")
         finally:
             for sock, _ in lobby:

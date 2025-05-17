@@ -30,7 +30,7 @@ class Event:
 
 
 class EventRouter:
-    def __init__(self):
+    def __init__(self) -> None:
         self.handlers: Dict[str, Callable[[Event], None]] = {}
 
     def register_handler(self, event_type: str, handler: Callable[[Event], None]) -> None:

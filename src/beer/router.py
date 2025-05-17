@@ -12,6 +12,8 @@ from typing import Any
 
 from .events import Event, Category
 from .common import PacketType
+from .io_utils import send as io_send
+from .session import GameSession
 
 logger = logging.getLogger(__name__)
 
@@ -95,12 +97,14 @@ class EventRouter:
     # ------------------------------------------------------------------
     def _broadcast(self, obj: Any, ptype: PacketType) -> None:
         s = self._s
-        s._send(s.p1_file_w, ptype=ptype, obj=obj)
-        s._send(s.p2_file_w, ptype=ptype, obj=obj)
+        # Delegate to io_utils.send, preserving packet type and sequence
+        io_send(s.p1_file_w, s.io_seq, ptype=ptype, obj=obj); s.io_seq += 1
+        io_send(s.p2_file_w, s.io_seq, ptype=ptype, obj=obj); s.io_seq += 1
         # Spectators are handled automatically because GameSession mirrors
         # packets written to player streams.
 
     def _unicast(self, player_idx: int, obj: Any) -> None:
         s = self._s
         w = s.p1_file_w if player_idx == 1 else s.p2_file_w
-        s._send(w, ptype=PacketType.GAME, obj=obj)
+        # Send only to specified player
+        io_send(w, s.io_seq, ptype=PacketType.GAME, obj=obj); s.io_seq += 1
