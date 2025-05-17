@@ -43,13 +43,14 @@ from typing import TextIO, Any, Callable, List
 
 from .battleship import Board, SHIPS, parse_coordinate, SHIP_LETTERS
 from .common import PacketType
-from .io_utils import send as io_send, send_grid, safe_readline
+from .io_utils import send as io_send, send_grid, safe_readline, chat_broadcast, recv_turn, refresh_views
 from .spectator_hub import SpectatorHub
 from .reconnect_controller import ReconnectController
+from .placement_wizard import run as place_ships
 from . import config as _cfg
 from .events import Event, Category
+from .coord_utils import coord_to_rowcol, format_coord, COORD_RE
 
-COORD_RE = re.compile(r"^[A-J](10|[1-9])$")  # Valid 10×10 coords
 TURN_TIMEOUT = _cfg.TURN_TIMEOUT  # seconds
 
 
@@ -84,8 +85,6 @@ class GameSession(threading.Thread):
         # Each player gets their *own* hidden board.
         self.board_p1 = Board()
         self.board_p2 = Board()
-        self.board_p1.place_ships_randomly(self.ships)
-        self.board_p2.place_ships_randomly(self.ships)
         # Spectator streams now managed via SpectatorHub
         # Every *half-turn* (i.e. after each individual shot) we increment
         # this counter; spectators receive a full dual-board update after
@@ -151,14 +150,55 @@ class GameSession(threading.Thread):
         self._notify(self.p1_file_w, f"START you {self.token_p1}")
         self._notify(self.p2_file_w, f"START opp {self.token_p2}")
 
-        # Manual placement skipped (random placement used)
+        # Manual placement via interactive wizard
+        # prepare safe_read callback with rebind for Player 1
+        def _safe_read_1(_: TextIO) -> str:
+            line = safe_readline(self.p1_file_r, lambda: self.recon.wait(1))
+            if not line and self.recon.wait(1):
+                new_sock = self.recon.take_new_socket(1)
+                self._rebind_slot(1, new_sock)
+                return safe_readline(self.p1_file_r, lambda: self.recon.wait(1))
+            return line
 
-        # Initial own-fleet reveal
-        send_grid(self.p1_file_w, self.io_seq, self.board_p1, reveal=True); self.io_seq += 1
-        send_grid(self.p2_file_w, self.io_seq, self.board_p2, reveal=True); self.io_seq += 1
-        # Initial opponent views
-        send_grid(self.p1_file_w, self.io_seq, self.board_p2);                self.io_seq += 1
-        send_grid(self.p2_file_w, self.io_seq, self.board_p1);                self.io_seq += 1
+        # Player 1 placement
+        if not place_ships(
+            self.board_p1,
+            self.p1_file_r,
+            self.p1_file_w,
+            _safe_read_1,
+        ):
+            self._conclude(2, reason="disconnect during placement")
+            return
+
+        # prepare safe_read callback with rebind for Player 2
+        def _safe_read_2(_: TextIO) -> str:
+            line = safe_readline(self.p2_file_r, lambda: self.recon.wait(2))
+            if not line and self.recon.wait(2):
+                new_sock = self.recon.take_new_socket(2)
+                self._rebind_slot(2, new_sock)
+                return safe_readline(self.p2_file_r, lambda: self.recon.wait(2))
+            return line
+
+        # Player 2 placement
+        if not place_ships(
+            self.board_p2,
+            self.p2_file_r,
+            self.p2_file_w,
+            _safe_read_2,
+        ):
+            self._conclude(1, reason="disconnect during placement")
+            return
+
+        # Initial own-fleet reveal and opponent views for both players
+        ok1, ok2, self.io_seq = refresh_views(
+            self.p1_file_w,
+            self.p2_file_w,
+            self.io_seq,
+            self.board_p1,
+            self.board_p2,
+        )
+        # Snapshot for any connected spectators
+        self.spec.snapshot(self.board_p1, self.board_p2)
 
         # Signal ready for spectators
         if self.session_ready:
@@ -173,28 +213,40 @@ class GameSession(threading.Thread):
             current_player = 1
 
             while True:
-                # Poll both sockets for disconnect before each turn
-                for idx, (r, w) in enumerate([(self.p1_file_r, self.p1_file_w), (self.p2_file_r, self.p2_file_w)], start=1):
+                # Poll both sockets for disconnect before each turn (handle simultaneous drops)
+                dropped_slots: list[int] = []
+                # Check each player slot for immediate disconnect
+                for idx, r, w in [(1, self.p1_file_r, self.p1_file_w), (2, self.p2_file_r, self.p2_file_w)]:
                     sock = r.buffer.raw._sock
                     readable, _, _ = select.select([sock], [], [], 0)
                     if readable:
-                        line = safe_readline(r, lambda: self.recon.wait(idx))
+                        # Peek for disconnect without recovery
+                        line = safe_readline(r, lambda: False, retry=False)
                         if not line:
+                            dropped_slots.append(idx)
+                if dropped_slots:
+                    failed: list[int] = []
+                    for idx in dropped_slots:
                             print(f"[DEBUG] run: disconnect on player {idx}")
-                            # allow a reconnect window first
+                        # attempt to reconnect
                             if self.recon.wait(idx):
-                                # Original player rejoined: rebind socket
                                 new_sock = self.recon.take_new_socket(idx)
                                 self._rebind_slot(idx, new_sock)
-                                continue    # resume turn with reattached player
-                            # then try to promote a spectator
+                            continue
+                        # attempt to promote a spectator
                             if self.spec.promote(idx, self):
-                                continue    # resume the same turn with new player
-                            # no one to promote → normal conclusion
-                            winner = 2 if idx == 1 else 1
+                            continue
+                        failed.append(idx)
+                    if failed:
+                        # If both players failed to rejoin simultaneously, P1 wins by default
+                        if set(failed) == {1, 2}:
+                            winner = 1
+                        elif 1 in failed:
+                            winner = 2
+                        else:
+                            winner = 1
                             self._conclude(winner, reason="timeout/disconnect")
                             return
-
                 # Process buffered lines if any
                 self._line_buffer.clear()
 
@@ -207,7 +259,7 @@ class GameSession(threading.Thread):
                 self._notify(attacker_w, "INFO Your turn – FIRE <coord> or QUIT")
                 self._emit(Event(Category.TURN, "prompt", {"player": current_player}))
 
-                coord = self._receive_coord(attacker_r, attacker_w, defender_r, defender_w)
+                coord = recv_turn(self, attacker_r, attacker_w, defender_r, defender_w)
                 if coord == "DEFENDER_LEFT":
                     # defender dropped mid-turn → try reconnect first
                     if self.recon.wait(defender_idx):
@@ -238,14 +290,14 @@ class GameSession(threading.Thread):
                 key = (row, col)
                 if key in self._fired[current_player]:
                     # Prevent duplicate shots: prompt error
-                    self._notify(attacker_w, f"ERR Already fired at {self._coord_str(row, col)}, choose another")
+                    self._notify(attacker_w, f"ERR Already fired at {format_coord(row, col)}, choose another")
                     continue  # re-prompt same player
                 self._fired[current_player].add(key)
 
                 # Peek ship letter before firing to identify which ship was hit (server console only)
                 orig_cell = defender_board.hidden_grid[row][col]
                 result, sunk_name = defender_board.fire_at(row, col)
-                coord_txt = self._coord_str(row, col)
+                coord_txt = format_coord(row, col)
 
                 # --- Human-friendly descriptive messages (single source of truth for clients/bots) ---
                 if result == "hit":
@@ -260,9 +312,8 @@ class GameSession(threading.Thread):
 
                 io_send(attacker_w, self.io_seq, msg=attacker_msg); self.io_seq += 1
                 io_send(defender_w, self.io_seq, msg=defender_msg); self.io_seq += 1
-                # Send per-shot messages to all spectators via hub
-                self.spec.broadcast(attacker_msg)
-                self.spec.broadcast(defender_msg)
+                # Send per-shot messages to all spectators via hub in one pass
+                self.spec.broadcast_msgs(attacker_msg, defender_msg)
 
                 # Count valid shot (hit or miss)
                 if result in {"hit", "miss"}:
@@ -287,45 +338,18 @@ class GameSession(threading.Thread):
                     self._conclude(current_player, reason="fleet destroyed")
                     return
 
-                # After each turn send updated own-board views to both players
-                ok1 = send_grid(self.p1_file_w, self.io_seq, self.board_p1, reveal=True); self.io_seq += 1
-                ok2 = send_grid(self.p2_file_w, self.io_seq, self.board_p2, reveal=True); self.io_seq += 1
+                # After each turn, refresh both players' boards
+                ok1, ok2, self.io_seq = refresh_views(
+                    self.p1_file_w,
+                    self.p2_file_w,
+                    self.io_seq,
+                    self.board_p1,
+                    self.board_p2,
+                )
                 if not ok1 or not ok2:
                     winner = 2 if not ok1 else 1
                     self._conclude(winner, reason="timeout/disconnect")
                     return
-
-                # Also send updated opponent views immediately
-                send_grid(self.p1_file_w, self.io_seq, self.board_p2); self.io_seq += 1
-                send_grid(self.p2_file_w, self.io_seq, self.board_p1); self.io_seq += 1
-
-                # After each turn, check for disconnects on the non-turn player
-                non_turn_player = 2 if current_player == 1 else 1
-                non_turn_r, non_turn_w = self._file_pair(non_turn_player)
-                try:
-                    # Use select to poll for data with a short timeout
-                    sock = non_turn_r.buffer.raw._sock
-                    poll_delay = _cfg.SERVER_POLL_DELAY
-                    readable, _, _ = select.select([sock], [], [], poll_delay)
-                    if readable:
-                        line = safe_readline(non_turn_r, lambda: self.recon.wait(non_turn_player))
-                        if not line:
-                            print(f"[DEBUG] run: disconnect detected on player {non_turn_player} after turn (readline)")
-                            # allow reconnect first
-                            if self.recon.wait(non_turn_player):
-                                # Original player rejoined: rebind socket
-                                new_sock = self.recon.take_new_socket(non_turn_player)
-                                self._rebind_slot(non_turn_player, new_sock)
-                                continue  # resume turn with reattached player
-                            # Try to promote a spectator into the vacant slot
-                            if self.spec.promote(non_turn_player, self):
-                                continue  # resume this turn with the new player
-                            # No one left to promote → end the game
-                            self._conclude(current_player, reason="timeout/disconnect")
-                            return
-                        # Ignore extra data read during poll – next turn will handle.
-                except Exception:
-                    pass
 
                 # After every *two* half-turns broadcast a fresh dual-board to spectators
                 self._half_turn_counter += 1
@@ -363,89 +387,6 @@ class GameSession(threading.Thread):
     def _file_pair(self, player_idx: int):
         return (self.p1_file_r, self.p1_file_w) if player_idx == 1 else (self.p2_file_r, self.p2_file_w)
 
-    def _receive_coord(self, r: TextIO, w: TextIO, defender_r: TextIO, defender_w: TextIO):
-        """Wait for a valid FIRE from *r* while tolerating chat/quit from both sides.
-
-        We block up to TURN_TIMEOUT, but also poll *defender_r* so that out-of-turn
-        traffic can be handled immediately (ERR/CHAT/QUIT).  This keeps the game
-        responsive and fixes the earlier bug where a premature FIRE could break
-        framing.
-
-        Returns:
-            tuple[int,int] – coordinate from *r*
-            "QUIT"         – the attacker conceded
-            None           – timeout or disconnect
-        """
-        start = time.time()
-        att_sock: socket.socket = r.buffer.raw._sock  # type: ignore[attr-defined]
-        def_sock: socket.socket = defender_r.buffer.raw._sock
-
-        while True:
-            remaining = TURN_TIMEOUT - (time.time() - start)
-            if remaining <= 0:
-                print("[DEBUG] _receive_coord: turn timeout")
-                return None
-            # Wait until either socket has data or timeout expires
-            readable, _, _ = select.select([att_sock, def_sock], [], [], remaining)
-            if not readable:
-                print("[DEBUG] _receive_coord: select timeout")
-                return None  # timeout
-
-            for sock in readable:
-                # Determine which input stream and player slot
-                file = r if sock is att_sock else defender_r
-                slot = 1 if file is self.p1_file_r else 2
-                # Perform a safe read with reconnect logic
-                line = safe_readline(file, lambda: self.recon.wait(slot))
-                if not line:
-                    # Treat empty as disconnect
-                    if file is defender_r:
-                        print("[DEBUG] _receive_coord: disconnect detected on defender socket")
-                        return "DEFENDER_LEFT"
-                    print("[DEBUG] _receive_coord: disconnect detected on attacker socket")
-                    return None
-                line = line.strip()
-                upper = line.upper()
-
-                if sock is def_sock:
-                    # Defender is not on turn
-                    if upper.startswith("CHAT "):
-                        chat_txt = line[5:].strip()
-                        idx = 2 if file is defender_r else 1
-                        chat_payload = {"name": f"P{idx}", "msg": chat_txt}
-                        io_send(self.p1_file_w, self.io_seq, ptype=PacketType.CHAT, msg=f"[CHAT] P{idx}: {chat_txt}", obj=chat_payload); self.io_seq += 1
-                        io_send(self.p2_file_w, self.io_seq, ptype=PacketType.CHAT, msg=f"[CHAT] P{idx}: {chat_txt}", obj=chat_payload); self.io_seq += 1
-                        self._emit(Event(Category.CHAT, "line", {"player": idx, "msg": chat_txt}))
-                        continue
-                    elif upper == "QUIT":
-                        winner = 1 if file is defender_r else 2
-                        self._conclude(winner, reason="concession")
-                        return None
-                    elif upper.startswith("FIRE "):
-                        io_send(defender_w, self.io_seq, msg="ERR Not your turn – wait for your turn prompt"); self.io_seq += 1
-                        continue  # keep waiting for attacker
-                    else:
-                        io_send(defender_w, self.io_seq, msg="ERR Invalid command. Use: FIRE <A-J1-10> or QUIT"); self.io_seq += 1
-                        continue
-                else:  # Attacker's own input
-                    if upper.startswith("CHAT "):
-                        chat_txt = line[5:].strip()
-                        idx = 1 if file is self.p1_file_r else 2
-                        chat_payload = {"name": f"P{idx}", "msg": chat_txt}
-                        io_send(self.p1_file_w, self.io_seq, ptype=PacketType.CHAT, msg=f"[CHAT] P{idx}: {chat_txt}", obj=chat_payload); self.io_seq += 1
-                        io_send(self.p2_file_w, self.io_seq, ptype=PacketType.CHAT, msg=f"[CHAT] P{idx}: {chat_txt}", obj=chat_payload); self.io_seq += 1
-                        self._emit(Event(Category.CHAT, "line", {"player": idx, "msg": chat_txt}))
-                        continue
-                    if upper == "QUIT":
-                        return "QUIT"
-                    if upper.startswith("FIRE "):
-                        coord_str = line[5:].strip().upper()
-                        if COORD_RE.match(coord_str):
-                            row = ord(coord_str[0]) - ord('A')
-                            col = int(coord_str[1:]) - 1
-                            return (row, col)
-                        io_send(w, self.io_seq, msg="ERR Invalid coordinate. Example: FIRE B7"); self.io_seq += 1
-
     def _conclude(self, winner: int, *, reason: str) -> None:
         print(f"[DEBUG] _conclude: winner={winner}, reason={reason}")
         loser = 2 if winner == 1 else 1
@@ -469,10 +410,6 @@ class GameSession(threading.Thread):
         end_payload = {"type": "end", "winner": winner, "shots": shots}
         io_send(win_w, self.io_seq, obj=end_payload); self.io_seq += 1
         io_send(lose_w, self.io_seq, obj=end_payload); self.io_seq += 1
-
-    @staticmethod
-    def _coord_str(row: int, col: int) -> str:  # Helper for "HIT B5"
-        return f"{chr(ord('A') + row)}{col + 1}"
 
     # Spectator operations delegated to SpectatorHub
 

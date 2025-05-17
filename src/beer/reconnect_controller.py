@@ -2,6 +2,7 @@
 import threading
 import socket
 from typing import Callable, Dict
+from .io_utils import send as io_send
 
 class ReconnectController:
     """
@@ -54,9 +55,21 @@ class ReconnectController:
             slot = 2
         else:
             return False
+        # Prevent duplicate reconnect attempts on the same slot
+        if slot in self.new_sockets:
+            # Token already in use: send error and close new socket
+            wfile = sock.makefile("w")
+            io_send(wfile, 0, msg="ERR token-in-use")
+            sock.close()
+            return False
         # Store new socket and signal waiters
         self.new_sockets[slot] = sock
         self.events[slot].set()
+        # Flush any buffered TOKEN line from the socket
+        try:
+            sock.makefile("r").readline()
+        except Exception:
+            pass
         return True
 
     def take_new_socket(self, slot: int) -> socket.socket:

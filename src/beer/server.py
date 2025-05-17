@@ -26,6 +26,7 @@ from . import config as _cfg
 from .events import Event
 from .common import PacketType
 from .router import EventRouter
+from .io_utils import send as io_send
 
 HOST = _cfg.DEFAULT_HOST
 PORT = _cfg.DEFAULT_PORT
@@ -132,6 +133,10 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
             while len(lobby) >= 2 and (not current_session or not current_session.is_alive()):
                 (c1, token1) = lobby.pop(0)
                 (c2, token2) = lobby.pop(0)
+                # Prevent duplicate tokens in a new match
+                if token1 and token2 and token1 == token2:
+                    print(f"[WARN] Duplicate token {token1} in lobby; resetting second slot to fresh token")
+                    token2 = None
                 print("[INFO] Launching new game session")
                 ships_list = ONE_SHIP_LIST if USE_ONE_SHIP else SHIPS
                 session_ready.clear()
@@ -158,14 +163,13 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
                     else:
                         w_sock, w_tok = sess.p2_sock, sess.token_p2
                         l_sock, l_tok = sess.p1_sock, sess.token_p1
-                    # After game end, close both client sockets to clean up
-                    with contextlib.suppress(Exception):
-                        w_sock.shutdown(socket.SHUT_RDWR)
-                        w_sock.close()
-                    with contextlib.suppress(Exception):
-                        l_sock.shutdown(socket.SHUT_RDWR)
-                        l_sock.close()
-                    print("[INFO] Waiting for new players…")
+                    # After game end, re-queue winner at front and loser conditionally
+                    lobby.insert(0, (w_sock, w_tok))
+                    if reason not in {"timeout", "concession"}:
+                        lobby.append((l_sock, l_tok))
+                    else:
+                        print(f"[INFO] Not re-queuing loser due to {reason}")
+                    print("[INFO] Re-queued players for new match")
                     _try_pair_lobby()
 
                 current_session.start()
@@ -189,27 +193,30 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
                 finally:
                     conn.settimeout(None)
                 print(f"[DEBUG] Handshake saw: {first_line!r}")
-                # Handle optional PID-token reconnect handshake
+                # Optional PID-token reconnect handshake (ignore stale tokens)
+                token_str = None
                 if first_line.upper().startswith("TOKEN "):
-                    parts = first_line.split()
-                    token_str = parts[1] if len(parts) > 1 else None
-                    if token_str is not None:
-                        ctrl = PID_REGISTRY.get(token_str)
-                        # Delegate attach to ReconnectController
-                        if ctrl and ctrl.attach_player(token_str, conn):
+                    parts = first_line.split(maxsplit=1)
+                    candidate = parts[1] if len(parts) > 1 else None
+                    if candidate:
+                        ctrl = PID_REGISTRY.get(candidate)
+                        if ctrl and ctrl.attach_player(candidate, conn):
                             print("[INFO] Reattached via PID-token")
                             continue
-                # New or unrecognized token → add to lobby (token drives pairing if present)
-                lobby.append((conn, token_str))
+                        # Stale or unknown token: notify and ignore
+                        wfile = conn.makefile("w")
+                        # Properly framed error packet to avoid client framing errors
+                        io_send(wfile, 0, msg=f"ERR Unknown token {candidate}")
+                        print(f"[WARN] Unknown token {candidate}, ignoring")
+                # After reconnect handshake, if a game is running, attach as spectator
+                if current_session and current_session.is_alive() and session_ready.is_set():
+                    current_session.spec.add(conn)
+                    print("[INFO] Spectator attached")
+                    continue
+                # Fresh join → add to lobby with no token
+                lobby.append((conn, None))
                 print(f"[DEBUG] Client added to lobby (len={len(lobby)})")
                 _try_pair_lobby()
-
-                if current_session and current_session.is_alive() and session_ready.is_set():
-                    # Attach any waiting sockets as spectators
-                    while lobby:
-                        sock, _ = lobby.pop(0)
-                        current_session.spec.add(sock)
-                        print("[INFO] Spectator attached from lobby")
         finally:
             for sock, _ in lobby:
                 with contextlib.suppress(Exception):

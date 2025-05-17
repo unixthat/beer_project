@@ -2,6 +2,7 @@ import threading
 import socket
 from typing import TextIO, Any, List, Callable
 from .io_utils import grid_rows
+import contextlib
 
 class SpectatorHub:
     """Manage spectators: add, broadcast messages, send board snapshots, and promote to player slot."""
@@ -23,8 +24,29 @@ class SpectatorHub:
     def broadcast(self, msg: str) -> None:
         """Broadcast a text message to all spectators."""
         with self._lock:
-            for wfile in list(self._writers):
+            for sock, wfile in list(zip(self._sockets, self._writers)):
+                try:
                 self._notify(wfile, msg, None)
+                except Exception:
+                    # Remove broken spectator
+                    self._sockets.remove(sock)
+                    self._writers.remove(wfile)
+                    with contextlib.suppress(Exception):
+                        sock.close()
+
+    def broadcast_msgs(self, *msgs: str) -> None:
+        """Broadcast multiple text messages to all spectators in one pass."""
+        with self._lock:
+            for sock, wfile in list(zip(self._sockets, self._writers)):
+                try:
+                for msg in msgs:
+                    self._notify(wfile, msg, None)
+                except Exception:
+                    # Remove broken spectator
+                    self._sockets.remove(sock)
+                    self._writers.remove(wfile)
+                    with contextlib.suppress(Exception):
+                        sock.close()
 
     def snapshot(self, board_p1: Any, board_p2: Any) -> None:
         """Send a full dual-board snapshot (with ships revealed) to all spectators."""
@@ -32,8 +54,15 @@ class SpectatorHub:
         rows_p2 = grid_rows(board_p2, reveal=True)
         payload = {"type": "spec_grid", "rows_p1": rows_p1, "rows_p2": rows_p2}
         with self._lock:
-            for wfile in list(self._writers):
+            for sock, wfile in list(zip(self._sockets, self._writers)):
+                try:
                 self._notify(wfile, None, payload)
+                except Exception:
+                    # Remove broken spectator
+                    self._sockets.remove(sock)
+                    self._writers.remove(wfile)
+                    with contextlib.suppress(Exception):
+                        sock.close()
 
     def promote(self, slot: int, session: Any) -> bool:
         """Promote the next spectator into the given player slot. Returns True if done."""

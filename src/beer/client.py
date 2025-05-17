@@ -120,6 +120,7 @@ def _prompt() -> None:
 
 def _recv_loop(sock: socket.socket, stop_evt: threading.Event, verbose: int) -> None:  # pragma: no cover
     """Continuously print messages from the server (framed packets only)."""
+    global TOKEN  # allow resetting on unknown-token errors
     br = sock.makefile("rb")  # buffered reader
 
     last_opp: Optional[list[str]] = None
@@ -220,11 +221,44 @@ def _recv_loop(sock: socket.socket, stop_evt: threading.Event, verbose: int) -> 
                     msg = obj.get("msg", "")
                     if not msg:
                         continue
-                    # INFO and ERR messages always shown
-                    if msg.startswith("INFO ") or msg.startswith("ERR ") or msg.startswith("[INFO] "):
+                    # START you: new token assignment
+                    if msg.startswith("START you "):
+                        # Extract token and persist it
+                        parts = msg.split(maxsplit=2)
+                        if len(parts) >= 3:
+                            new_token = parts[2]
+                            try:
+                                TOKEN_FILE.write_text(new_token)
+                                global TOKEN  # update in-memory TOKEN
+                                TOKEN = new_token
+                            except Exception:
+                                pass
+                        print(msg)
+                        continue
+                    # START opp: just display
+                    if msg.startswith("START opp "):
+                        print(msg)
+                        continue
+                    # Handle unknown-token error silently: reset persistent token, do not display
+                    if msg.startswith("ERR Unknown token "):
+                        try:
+                            TOKEN_FILE.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                        # Persist new default token for next connection (will be overwritten on START you)
+                        default_tok = f"PID{os.getpid()}"
+                        TOKEN = default_tok
+                        try:
+                            TOKEN_FILE.write_text(default_tok)
+                        except Exception:
+                            pass
+                        continue
+                    # INFO and other ERR messages shown
+                    if msg.startswith("INFO ") or (msg.startswith("ERR ") and not msg.startswith("ERR Unknown token ")) or msg.startswith("[INFO] "):
                         print(f"\r{msg}")
+                        continue
                     # Raw/unrecognized frames at verbose>=1
-                    elif verbose >= 1 and "raw" not in _cfg.QUIET_CATEGORIES:
+                    if verbose >= 1 and "raw" not in _cfg.QUIET_CATEGORIES:
                         print(obj)
             elif ptype == PacketType.CHAT and isinstance(obj, dict):
                 handlers["chat"](obj)
