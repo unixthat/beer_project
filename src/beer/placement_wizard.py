@@ -14,15 +14,18 @@ import time
 from . import config as _cfg
 import select
 
+
 class PlacementTimeout(Exception):
     """Raised when manual ship placement exceeds the allowed time."""
+
     pass
+
 
 def run(board: Board, r: TextIO, w: TextIO, safe_read: Callable[[TextIO], str]) -> bool:
     # Ask preference
     io_send(w, 0, msg="INFO Manual placement? [y/N]")
     # Wait up to PLACEMENT_TIMEOUT for the manual-placement answer
-    sock = getattr(r.buffer.raw, '_sock', None)
+    sock = getattr(r.buffer.raw, "_sock", None)
     if sock is not None:
         readable, _, _ = select.select([sock], [], [], _cfg.PLACEMENT_TIMEOUT)
     else:

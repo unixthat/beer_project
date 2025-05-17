@@ -27,6 +27,7 @@ from .common import (
     enable_encryption,
     DEFAULT_KEY,
 )
+
 # Re-use helper renderers from the interactive client
 from .client import _print_two_grids, _is_reveal_grid
 
@@ -100,6 +101,7 @@ class _BotState:
 
 # ---------------- receiver thread -----------------
 
+
 class BotReceiver(threading.Thread):
     """Background thread that listens to framed packets and updates the bot state.
 
@@ -165,7 +167,7 @@ class BotReceiver(threading.Thread):
         winner = obj.get("winner")
         shots = obj.get("shots")
         # Print result from this bot's perspective
-        if getattr(self, '_my_index', None) == winner:
+        if getattr(self, "_my_index", None) == winner:
             print("WIN")
         else:
             print("LOSE")
@@ -251,12 +253,15 @@ class BotReceiver(threading.Thread):
 
 # -------------------------- main ----------------------------
 
+
 def main() -> None:  # pragma: no cover
     parser = argparse.ArgumentParser(description="Automated BEER Battleship bot")
     parser.add_argument("--host", default=HOST)
     parser.add_argument("--port", type=int, default=PORT)
     parser.add_argument("--seed", type=int, default=None, help="Random seed for deterministic play")
-    parser.add_argument("--secure", nargs="?", const="default", help="Enable AES-CTR encryption optionally with hex key")
+    parser.add_argument(
+        "--secure", nargs="?", const="default", help="Enable AES-CTR encryption optionally with hex key"
+    )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument("-v", "--verbose", action="count", default=0, help="Increase verbosity (stackable)")
     parser.add_argument("-q", "--quiet", action="store_true", help="Suppress all stdout except final result")

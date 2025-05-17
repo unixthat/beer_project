@@ -206,11 +206,7 @@ class BotLogic:
 
         # After handling the outcome we may now be ready to start the axis
         # sweep if the probe queue has just become empty.
-        if (
-            self.axis is None
-            and self._pending_axis_hit is not None
-            and not self.probe_queue
-        ):
+        if self.axis is None and self._pending_axis_hit is not None and not self.probe_queue:
             self._maybe_start_axis(self._pending_axis_hit)
             self._pending_axis_hit = None
 
@@ -348,6 +344,7 @@ class BotLogic:
 # SimpleParityBotLogic – minimal hunt/target with white-first parity
 # ------------------------------------------------------------------
 
+
 class SimpleParityBotLogic:
     """Very simple Battleship bot: shoot all white squares first, finishing ships via adjacents, then blacks."""
 
@@ -405,6 +402,7 @@ class SimpleParityBotLogic:
                     self.target_queue.append(nbr)
         # Always mark shot as taken
         self.shots_taken.add(rc)
+
 
 # ------------------------------------------------------------------
 # Public export selector

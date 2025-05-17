@@ -15,9 +15,9 @@ from typing import Any, Dict, Callable
 class Category(Enum):
     """High-level event categories."""
 
-    TURN = auto()      # per-turn lifecycle (start, shot, end)
-    CHAT = auto()      # player chat
-    SYSTEM = auto()    # connect / disconnect / timeout etc.
+    TURN = auto()  # per-turn lifecycle (start, shot, end)
+    CHAT = auto()  # player chat
+    SYSTEM = auto()  # connect / disconnect / timeout etc.
 
 
 @dataclass(slots=True)
@@ -25,7 +25,7 @@ class Event:
     """Immutable event emitted by GameSession."""
 
     category: Category
-    type: str              # finer-grained identifier, e.g. "shot", "hit", "sunk"
+    type: str  # finer-grained identifier, e.g. "shot", "hit", "sunk"
     payload: Dict[str, Any]
 
 

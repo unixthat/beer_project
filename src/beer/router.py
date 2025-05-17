@@ -98,8 +98,10 @@ class EventRouter:
     def _broadcast(self, obj: Any, ptype: PacketType) -> None:
         s = self._s
         # Delegate to io_utils.send, preserving packet type and sequence
-        io_send(s.p1_file_w, s.io_seq, ptype=ptype, obj=obj); s.io_seq += 1
-        io_send(s.p2_file_w, s.io_seq, ptype=ptype, obj=obj); s.io_seq += 1
+        io_send(s.p1_file_w, s.io_seq, ptype=ptype, obj=obj)
+        s.io_seq += 1
+        io_send(s.p2_file_w, s.io_seq, ptype=ptype, obj=obj)
+        s.io_seq += 1
         # Spectators are handled automatically because GameSession mirrors
         # packets written to player streams.
 
@@ -107,4 +109,5 @@ class EventRouter:
         s = self._s
         w = s.p1_file_w if player_idx == 1 else s.p2_file_w
         # Send only to specified player
-        io_send(w, s.io_seq, ptype=PacketType.GAME, obj=obj); s.io_seq += 1
+        io_send(w, s.io_seq, ptype=PacketType.GAME, obj=obj)
+        s.io_seq += 1

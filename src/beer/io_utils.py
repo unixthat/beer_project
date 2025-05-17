@@ -15,7 +15,9 @@ from .battleship import Board
 from .commands import parse_command, ChatCommand, FireCommand, QuitCommand, CommandParseError
 
 
-def send(w: TextIO, seq: int, ptype: PacketType = PacketType.GAME, *, msg: str | None = None, obj: Any | None = None) -> bool:
+def send(
+    w: TextIO, seq: int, ptype: PacketType = PacketType.GAME, *, msg: str | None = None, obj: Any | None = None
+) -> bool:
     payload = obj if obj is not None else {"msg": msg}
     try:
         send_pkt(w.buffer, ptype, seq, payload)  # type: ignore[arg-type]
@@ -28,10 +30,7 @@ def send(w: TextIO, seq: int, ptype: PacketType = PacketType.GAME, *, msg: str |
 def grid_rows(board: Board, *, reveal: bool = False) -> List[str]:
     rows: list[str] = []
     for r in range(board.size):
-        cell_row = [
-            board.hidden_grid[r][c] if reveal else board.display_grid[r][c]
-            for c in range(board.size)
-        ]
+        cell_row = [board.hidden_grid[r][c] if reveal else board.display_grid[r][c] for c in range(board.size)]
         rows.append(" ".join(cell_row))
     return rows
 
@@ -197,9 +196,13 @@ def refresh_views(
     Send own-fleet reveal and opponent views to both players.
     Returns (ok1, ok2, new_seq).
     """
-    ok1 = send_grid(w1, seq, board1, reveal=True); seq += 1
-    ok2 = send_grid(w2, seq, board2, reveal=True); seq += 1
+    ok1 = send_grid(w1, seq, board1, reveal=True)
+    seq += 1
+    ok2 = send_grid(w2, seq, board2, reveal=True)
+    seq += 1
     # Opponent views
-    send_grid(w1, seq, board2); seq += 1
-    send_grid(w2, seq, board1); seq += 1
+    send_grid(w1, seq, board2)
+    seq += 1
+    send_grid(w2, seq, board1)
+    seq += 1
     return ok1, ok2, seq

@@ -44,11 +44,14 @@ logger = logging.getLogger(__name__)
 # Registry for PID-based reconnect tokens (maps token to ReconnectController)
 PID_REGISTRY: dict[str, ReconnectController] = {}
 
+
 # Add helper for requeue logic
-def requeue_players(lobby: list[tuple[socket.socket, Optional[str]]],
-                    winner: tuple[socket.socket, Optional[str]],
-                    loser: tuple[socket.socket, Optional[str]],
-                    reason: str) -> None:
+def requeue_players(
+    lobby: list[tuple[socket.socket, Optional[str]]],
+    winner: tuple[socket.socket, Optional[str]],
+    loser: tuple[socket.socket, Optional[str]],
+    reason: str,
+) -> None:
     """
     Requeue logic: insert winner at front/head, and append loser if reason
     not in {"timeout", "concession"}.
@@ -123,7 +126,9 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
     # Determine effective verbosity: silent → -1, otherwise 0/1/2 (count of -v)
     eff_verbose = -1 if args.silent else args.verbose
 
-    logging.basicConfig(level=logging.DEBUG if _cfg.DEBUG else logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    logging.basicConfig(
+        level=logging.DEBUG if _cfg.DEBUG else logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    )
     _parse_cli_flags(sys.argv)
 
     print(f"[INFO] BEER server listening on {HOST}:{PORT}")
@@ -164,11 +169,14 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
                 t1 = token1 or f"PID{next(_pid_counter)}"
                 t2 = token2 or f"PID{next(_pid_counter)}"
                 # Instantiate session (ReconnectController inside will register tokens)
-                current_session = GameSession(c1, c2, ships=ships_list, token_p1=t1, token_p2=t2, session_ready=session_ready)
+                current_session = GameSession(
+                    c1, c2, ships=ships_list, token_p1=t1, token_p2=t2, session_ready=session_ready
+                )
 
                 # Temporary event router – converts to debug log for now.
                 router = EventRouter(current_session)
                 current_session.subscribe(router)
+
                 # Monitor and loop
                 def _monitor_session(sess: GameSession) -> None:
                     sess.join()

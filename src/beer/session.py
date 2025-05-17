@@ -57,7 +57,9 @@ TURN_TIMEOUT = _cfg.TURN_TIMEOUT  # seconds
 class GameSession(threading.Thread):
     """Thread managing a single two-player match."""
 
-    def __init__(self, p1: socket.socket, p2: socket.socket, *, token_p1: str, token_p2: str, ships=None, session_ready=None):
+    def __init__(
+        self, p1: socket.socket, p2: socket.socket, *, token_p1: str, token_p2: str, ships=None, session_ready=None
+    ):
         """Create a thread that manages a full two-player match.
 
         Args:
@@ -98,20 +100,21 @@ class GameSession(threading.Thread):
         self.token_p2 = token_p2
         # Modular I/O sequencing and helpers
         self.io_seq = 0
+
         # Unified send callback for writing to a TextIO
         def _notify(wfile: TextIO, msg: str | None = None, obj: Any | None = None) -> None:
             # Send a GAME packet with text or obj payload
             io_send(wfile, self.io_seq, msg=msg, obj=obj)
             self.io_seq += 1
+
         self._notify = _notify
         # Convenience for reconnect notifications to player slots
-        self._notify_player = lambda slot, txt: self._notify(
-            self.p1_file_w if slot == 1 else self.p2_file_w, txt
-        )
+        self._notify_player = lambda slot, txt: self._notify(self.p1_file_w if slot == 1 else self.p2_file_w, txt)
         # Spectator management
         self.spec = SpectatorHub(self._notify)
         # Reconnect controller (handles wait windows and token reattachment)
         from .server import PID_REGISTRY
+
         self.recon = ReconnectController(
             _cfg.RECONNECT_TIMEOUT,
             self._notify_player,
@@ -127,7 +130,7 @@ class GameSession(threading.Thread):
         # Shot counters per player
         self._shots: dict[int, int] = {1: 0, 2: 0}
         # Track fired coords to prevent duplicate shots
-        self._fired: dict[int, set[tuple[int,int]]] = {1: set(), 2: set()}
+        self._fired: dict[int, set[tuple[int, int]]] = {1: set(), 2: set()}
 
         # Event subscribers
         self._subs: List[Callable[[Event], None]] = []
@@ -258,7 +261,7 @@ class GameSession(threading.Thread):
                         # Original defender rejoined: rebind socket
                         new_sock = self.recon.take_new_socket(defender_idx)
                         self._rebind_slot(defender_idx, new_sock)
-                        continue     # resume turn with reattached defender
+                        continue  # resume turn with reattached defender
                     # cascade spectator promotion until one fills or none left
                     while not self.spec.promote(defender_idx, self):
                         if self.spec.empty():
@@ -266,7 +269,7 @@ class GameSession(threading.Thread):
                             winner = 2 if current_player == 1 else 1
                             self._conclude(winner, reason="timeout")
                             return
-                    continue     # resume same turn with new defender
+                    continue  # resume same turn with new defender
                 if coord is None:
                     # TURN_TIMEOUT or dropped during FIRE → immediate concession
                     self.drop_and_deregister(current_player, reason="timeout")
@@ -302,8 +305,10 @@ class GameSession(threading.Thread):
                     attacker_msg = f"YOU MISSED at {coord_txt}"
                     defender_msg = f"OPPONENT MISSED at {coord_txt}"
 
-                io_send(attacker_w, self.io_seq, msg=attacker_msg); self.io_seq += 1
-                io_send(defender_w, self.io_seq, msg=defender_msg); self.io_seq += 1
+                io_send(attacker_w, self.io_seq, msg=attacker_msg)
+                self.io_seq += 1
+                io_send(defender_w, self.io_seq, msg=defender_msg)
+                self.io_seq += 1
                 # Send per-shot messages to all spectators via hub in one pass
                 self.spec.broadcast_msgs(attacker_msg, defender_msg)
 
@@ -357,6 +362,7 @@ class GameSession(threading.Thread):
             self.spec.snapshot(self.board_p1, self.board_p2)
             # Cleanup reconnect tokens
             from .server import PID_REGISTRY
+
             PID_REGISTRY.pop(self.recon.token1, None)
             PID_REGISTRY.pop(self.recon.token2, None)
 
@@ -409,8 +415,10 @@ class GameSession(threading.Thread):
         self._emit(Event(Category.TURN, "end", {"winner": winner, "reason": reason, "shots": shots}))
         # Send structured end-of-game frames to clients so bots can handle WIN/LOSE
         end_payload = {"type": "end", "winner": winner, "shots": shots}
-        io_send(win_w, self.io_seq, obj=end_payload); self.io_seq += 1
-        io_send(lose_w, self.io_seq, obj=end_payload); self.io_seq += 1
+        io_send(win_w, self.io_seq, obj=end_payload)
+        self.io_seq += 1
+        io_send(lose_w, self.io_seq, obj=end_payload)
+        self.io_seq += 1
 
     # Spectator operations delegated to SpectatorHub
 
@@ -477,12 +485,13 @@ class GameSession(threading.Thread):
         sock.close()
         # Unregister reconnect tokens
         from .server import PID_REGISTRY
+
         PID_REGISTRY.pop(self.token_p1, None)
         PID_REGISTRY.pop(self.token_p2, None)
         # Determine winner
         winner = 2 if slot == 1 else 1
         self._conclude(winner, reason=reason)
 
+
 # End of GameSession module
 # EOF
-

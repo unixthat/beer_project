@@ -4,23 +4,29 @@ from typing import Union
 
 from .coord_utils import COORD_RE, coord_to_rowcol
 
+
 class CommandParseError(Exception):
     """Raised when a line cannot be parsed as a valid command."""
+
 
 @dataclass(frozen=True)
 class ChatCommand:
     text: str
+
 
 @dataclass(frozen=True)
 class FireCommand:
     row: int
     col: int
 
+
 @dataclass(frozen=True)
 class QuitCommand:
     pass
 
+
 Command = Union[ChatCommand, FireCommand, QuitCommand]
+
 
 def parse_command(line: str) -> Command:
     if line is None:

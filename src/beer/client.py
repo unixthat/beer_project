@@ -27,8 +27,9 @@ HOST = _cfg.DEFAULT_HOST
 PORT = _cfg.DEFAULT_PORT
 
 # Logging setup respects global DEBUG flag
-logging.basicConfig(level=logging.DEBUG if _cfg.DEBUG else logging.INFO,
-                    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+logging.basicConfig(
+    level=logging.DEBUG if _cfg.DEBUG else logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
 logger = logging.getLogger(__name__)
 
 # ------------------- PID-token handshake token -------------------
@@ -232,7 +233,11 @@ def _recv_loop(sock: socket.socket, stop_evt: threading.Event, verbose: int) -> 
                         TOKEN = f"PID{os.getppid()}"
                         continue
                     # INFO and other ERR messages shown
-                    if msg.startswith("INFO ") or (msg.startswith("ERR ") and not msg.startswith("ERR Unknown token ")) or msg.startswith("[INFO] "):
+                    if (
+                        msg.startswith("INFO ")
+                        or (msg.startswith("ERR ") and not msg.startswith("ERR Unknown token "))
+                        or msg.startswith("[INFO] ")
+                    ):
                         print(f"\r{msg}")
                         continue
                     # Raw/unrecognized frames at verbose>=1
@@ -253,7 +258,7 @@ def _recv_loop(sock: socket.socket, stop_evt: threading.Event, verbose: int) -> 
 # ----------------------------- main -------------------------------
 
 
-def main() -> None:    # pragma: no cover – CLI entry
+def main() -> None:  # pragma: no cover – CLI entry
     """Interactive CLI client."""
 
     parser = argparse.ArgumentParser(description="BEER CLI client")
@@ -320,9 +325,11 @@ def _client(s, args):
             print(f"[INFO] Server not ready at {addr}, retrying in 1s…", flush=True)
             s.close()
             import socket as _socket
+
             s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
         try:
             import time
+
             time.sleep(1)
         except KeyboardInterrupt:
             print("\n[INFO] Client exiting.")
@@ -344,6 +351,7 @@ def _client(s, args):
             # Use select on stdin to avoid hang after disconnection.
             import sys
             import select
+
             if not locals().get("_prompt_shown", False):
                 _prompt()
                 _prompt_shown = True  # type: ignore[var-annotated]

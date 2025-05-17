@@ -4,11 +4,12 @@ from typing import Tuple
 # Regex for valid coordinates A1–J10
 COORD_RE = re.compile(r"^[A-J](10|[1-9])$")
 
+
 def coord_to_rowcol(coord: str) -> Tuple[int, int]:
     """
     Convert a coordinate like 'A1' through 'J10' to zero-based (row, col) tuple.
     """
-    row = ord(coord[0]) - ord('A')
+    row = ord(coord[0]) - ord("A")
     col = int(coord[1:]) - 1
     return row, col
 

@@ -1,8 +1,10 @@
 """ReconnectController: manage reconnect wait window and token-based reattachment for two-player slots."""
+
 import threading
 import socket
 from typing import Callable, Dict
 from .io_utils import send as io_send
+
 
 class ReconnectController:
     """
@@ -15,7 +17,7 @@ class ReconnectController:
         notify_fn: Callable[[int, str], None],
         token1: str,
         token2: str,
-        registry: Dict[str, 'ReconnectController'],
+        registry: Dict[str, "ReconnectController"],
     ):
         self.timeout = timeout
         # Protect new_sockets for non-blocking rebind

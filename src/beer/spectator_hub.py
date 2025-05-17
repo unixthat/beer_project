@@ -4,6 +4,7 @@ from typing import TextIO, Any, List, Callable
 from .io_utils import grid_rows
 import contextlib
 
+
 class SpectatorHub:
     """Manage spectators: add, broadcast messages, send board snapshots, and promote to player slot."""
 
