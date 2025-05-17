@@ -167,7 +167,7 @@ class GameSession(threading.Thread):
             self.p1_file_w,
             _safe_read_1,
         ):
-            self._conclude(2, reason="disconnect during placement")
+            self.drop_and_deregister(1, reason="disconnect during placement")
             return
 
         # prepare safe_read callback with rebind for Player 2
@@ -186,7 +186,7 @@ class GameSession(threading.Thread):
             self.p2_file_w,
             _safe_read_2,
         ):
-            self._conclude(1, reason="disconnect during placement")
+            self.drop_and_deregister(2, reason="disconnect during placement")
             return
 
         # Initial own-fleet reveal and opponent views for both players
@@ -225,28 +225,9 @@ class GameSession(threading.Thread):
                         if not line:
                             dropped_slots.append(idx)
                 if dropped_slots:
-                    failed: list[int] = []
-                    for idx in dropped_slots:
-                            print(f"[DEBUG] run: disconnect on player {idx}")
-                        # attempt to reconnect
-                            if self.recon.wait(idx):
-                                new_sock = self.recon.take_new_socket(idx)
-                                self._rebind_slot(idx, new_sock)
-                            continue
-                        # attempt to promote a spectator
-                            if self.spec.promote(idx, self):
-                            continue
-                        failed.append(idx)
-                    if failed:
-                        # If both players failed to rejoin simultaneously, P1 wins by default
-                        if set(failed) == {1, 2}:
-                            winner = 1
-                        elif 1 in failed:
-                            winner = 2
-                        else:
-                            winner = 1
-                            self._conclude(winner, reason="timeout/disconnect")
-                            return
+                    # Delegate to helper; if it concludes match, exit run
+                    if self._handle_disconnects(dropped_slots):
+                        return
                 # Process buffered lines if any
                 self._line_buffer.clear()
 
@@ -267,22 +248,22 @@ class GameSession(threading.Thread):
                         new_sock = self.recon.take_new_socket(defender_idx)
                         self._rebind_slot(defender_idx, new_sock)
                         continue     # resume turn with reattached defender
-                    # otherwise try to promote a spectator
-                    if self.spec.promote(defender_idx, self):
-                        continue     # resume same turn with new defender
-                    # no one left → end match
-                    winner = 2 if current_player == 1 else 1
-                    self._conclude(winner, reason="timeout/disconnect")
-                    return
+                    # cascade spectator promotion until one fills or none left
+                    while not self.spec.promote(defender_idx, self):
+                        if self.spec.empty():
+                            # no spectators left → opponent wins by timeout
+                            winner = 2 if current_player == 1 else 1
+                            self._conclude(winner, reason="timeout")
+                            return
+                    continue     # resume same turn with new defender
                 if coord is None:
                     # TURN_TIMEOUT or dropped during FIRE → immediate concession
-                    opponent = 2 if current_player == 1 else 1
-                    self._conclude(opponent, reason="timeout")
+                    self.drop_and_deregister(current_player, reason="timeout")
                     return
 
                 if coord == "QUIT":
-                    winner = 2 if current_player == 1 else 1
-                    self._conclude(winner, reason="concession")
+                    # Player conceded mid-turn
+                    self.drop_and_deregister(current_player, reason="concession")
                     return
 
                 row, col = coord  # tuple[int, int]
@@ -425,6 +406,60 @@ class GameSession(threading.Thread):
             except Exception:
                 # Don't let a misbehaving subscriber kill the game thread
                 pass
+
+    # Add helper for handling simultaneous disconnects
+    def _handle_disconnects(self, dropped_slots: list[int]) -> bool:
+        """
+        Handle simultaneous disconnects: for each dropped slot, attempt reconnect,
+        then spectator promotion; any that still fail are recorded. If any failures occur,
+        conclude the match:
+          - both fail: Player 1 wins by default, reason="abandoned"
+          - single fail: opponent wins, reason="timeout/disconnect"
+        Return True if the match concluded and run should exit, False otherwise.
+        """
+        failed: list[int] = []
+        for idx in dropped_slots:
+            print(f"[DEBUG] disconnect on player {idx}")
+            if self.recon.wait(idx):
+                new_sock = self.recon.take_new_socket(idx)
+                self._rebind_slot(idx, new_sock)
+                continue
+            if self.spec.promote(idx, self):
+                continue
+            failed.append(idx)
+        if failed:
+            if set(failed) == {1, 2}:
+                winner = 1
+                reason = "abandoned"
+            else:
+                winner = 2 if 1 in failed else 1
+                reason = "timeout/disconnect"
+            self._conclude(winner, reason=reason)
+            return True
+        return False
+
+    def drop_and_deregister(self, slot: int, reason: str) -> None:
+        """
+        Close the given player's socket, unregister tokens, and conclude the match.
+        """
+        # Determine socket and tokens
+        if slot == 1:
+            sock = self.p1_sock
+        else:
+            sock = self.p2_sock
+        # Close socket
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except Exception:
+            pass
+        sock.close()
+        # Unregister reconnect tokens
+        from .server import PID_REGISTRY
+        PID_REGISTRY.pop(self.token_p1, None)
+        PID_REGISTRY.pop(self.token_p2, None)
+        # Determine winner
+        winner = 2 if slot == 1 else 1
+        self._conclude(winner, reason=reason)
 
 # End of GameSession module
 # EOF

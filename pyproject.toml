@@ -38,9 +38,4 @@ plugins = []
 warn_unused_ignores = false
 
 [tool.pytest.ini_options]
-testpaths = [
-    "tests/tier1",
-    "tests/tier2",
-    "tests/tier3",
-    "tests/tier4"
-]
+testpaths = ["tests"]

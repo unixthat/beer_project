@@ -44,6 +44,26 @@ logger = logging.getLogger(__name__)
 # Registry for PID-based reconnect tokens (maps token to ReconnectController)
 PID_REGISTRY: dict[str, ReconnectController] = {}
 
+# Add helper for requeue logic
+def requeue_players(lobby: list[tuple[socket.socket, Optional[str]]],
+                    winner: tuple[socket.socket, Optional[str]],
+                    loser: tuple[socket.socket, Optional[str]],
+                    reason: str) -> None:
+    """
+    Requeue logic: insert winner at front/head, and append loser if reason
+    not in {"timeout", "concession"}.
+    """
+    # Skip requeue if winner socket is already closed
+    try:
+        if winner[0].fileno() == -1:
+            return
+    except Exception:
+        # Unable to determine fileno; assume alive
+        pass
+    lobby.insert(0, winner)
+    if reason not in {"timeout", "concession"}:
+        lobby.append(loser)
+
 
 def _parse_cli_flags(argv: list[str]) -> None:
     """Parse --secure[=<hex>] and enable encryption if requested."""
@@ -163,12 +183,8 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
                     else:
                         w_sock, w_tok = sess.p2_sock, sess.token_p2
                         l_sock, l_tok = sess.p1_sock, sess.token_p1
-                    # After game end, re-queue winner at front and loser conditionally
-                    lobby.insert(0, (w_sock, w_tok))
-                    if reason not in {"timeout", "concession"}:
-                        lobby.append((l_sock, l_tok))
-                    else:
-                        print(f"[INFO] Not re-queuing loser due to {reason}")
+                    # After game end, re-queue players per queue policy
+                    requeue_players(lobby, (w_sock, w_tok), (l_sock, l_tok), reason)
                     print("[INFO] Re-queued players for new match")
                     _try_pair_lobby()
 

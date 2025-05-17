@@ -10,7 +10,12 @@ from typing import TextIO, Callable
 from .battleship import Board, SHIPS, parse_coordinate, SHIP_LETTERS
 from .io_utils import send as io_send, send_grid
 from .coord_utils import COORD_RE
+import time
+from . import config as _cfg
 
+class PlacementTimeout(Exception):
+    """Raised when manual ship placement exceeds the allowed time."""
+    pass
 
 def run(board: Board, r: TextIO, w: TextIO, safe_read: Callable[[TextIO], str]) -> bool:
     # Ask preference
@@ -23,7 +28,13 @@ def run(board: Board, r: TextIO, w: TextIO, safe_read: Callable[[TextIO], str]) 
     board.reset()
 
     for ship_name, ship_size in SHIPS:
+        # Reset timeout for each ship placement
+        deadline = time.time() + _cfg.PLACEMENT_TIMEOUT
         while True:
+            # Check remaining time
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                raise PlacementTimeout(f"Placement of {ship_name} timed out after {_cfg.PLACEMENT_TIMEOUT}s")
             send_grid(w, 0, board, reveal=True)
             io_send(w, 0, msg=f"INFO Place {ship_name} – <coord> [H|V]")
             line = safe_read(r)

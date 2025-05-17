@@ -107,6 +107,13 @@ def recv_turn(
                     return "DEFENDER_LEFT"
                 return None
             line = raw_line.strip()
+            # Spectator command guard (G-8)
+            if session.spec.is_spectator(file):
+                # Spectators cannot issue commands
+                send(writer, session.io_seq, msg="ERR Spectators cannot issue commands")
+                session.io_seq += 1
+                continue
+
             # Parse via commands.py
             try:
                 cmd = parse_command(line)
@@ -165,8 +172,8 @@ def recv_turn(
                 return (cmd.row, cmd.col)
             # Should not reach here, but catch-all
             send(w, session.io_seq, msg="ERR Unknown error processing command")
-                session.io_seq += 1
-                continue
+            session.io_seq += 1
+            continue
 
 
 # Helper to refresh both players' boards with own and opponent views

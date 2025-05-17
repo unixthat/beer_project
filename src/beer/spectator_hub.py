@@ -26,7 +26,7 @@ class SpectatorHub:
         with self._lock:
             for sock, wfile in list(zip(self._sockets, self._writers)):
                 try:
-                self._notify(wfile, msg, None)
+                    self._notify(wfile, msg, None)
                 except Exception:
                     # Remove broken spectator
                     self._sockets.remove(sock)
@@ -39,8 +39,8 @@ class SpectatorHub:
         with self._lock:
             for sock, wfile in list(zip(self._sockets, self._writers)):
                 try:
-                for msg in msgs:
-                    self._notify(wfile, msg, None)
+                    for msg in msgs:
+                        self._notify(wfile, msg, None)
                 except Exception:
                     # Remove broken spectator
                     self._sockets.remove(sock)
@@ -56,13 +56,29 @@ class SpectatorHub:
         with self._lock:
             for sock, wfile in list(zip(self._sockets, self._writers)):
                 try:
-                self._notify(wfile, None, payload)
+                    self._notify(wfile, None, payload)
                 except Exception:
                     # Remove broken spectator
                     self._sockets.remove(sock)
                     self._writers.remove(wfile)
                     with contextlib.suppress(Exception):
                         sock.close()
+
+    def empty(self) -> bool:
+        """Return True if there are no waiting spectators."""
+        with self._lock:
+            return not self._sockets
+
+    def is_spectator(self, file: TextIO) -> bool:
+        """
+        Return True if the given TextIO reader corresponds to a spectator socket.
+        """
+        try:
+            sock = file.buffer.raw._sock  # type: ignore[attr-defined]
+        except Exception:
+            return False
+        with self._lock:
+            return sock in self._sockets
 
     def promote(self, slot: int, session: Any) -> bool:
         """Promote the next spectator into the given player slot. Returns True if done."""

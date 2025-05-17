@@ -59,7 +59,14 @@ class ReconnectController:
         if slot in self.new_sockets:
             # Token already in use: send error and close new socket
             wfile = sock.makefile("w")
-            io_send(wfile, 0, msg="ERR token-in-use")
+            sent = io_send(wfile, 0, msg="ERR token-in-use")
+            if not sent:
+                # Fallback raw write if framing failed
+                try:
+                    wfile.write("ERR token-in-use\n")
+                    wfile.flush()
+                except Exception:
+                    pass
             sock.close()
             return False
         # Store new socket and signal waiters
