@@ -209,29 +209,27 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
                 finally:
                     conn.settimeout(None)
                 print(f"[DEBUG] Handshake saw: {first_line!r}")
-                # Optional PID-token reconnect handshake (ignore stale tokens)
                 token_str = None
                 if first_line.upper().startswith("TOKEN "):
                     parts = first_line.split(maxsplit=1)
                     candidate = parts[1] if len(parts) > 1 else None
                     if candidate:
                         ctrl = PID_REGISTRY.get(candidate)
-                        if ctrl and ctrl.attach_player(candidate, conn):
-                            print("[INFO] Reattached via PID-token")
+                        if ctrl:
+                            if ctrl.attach_player(candidate, conn):
+                                print("[INFO] Reattached via PID-token")
+                            # Duplicate or failed attach: drop this connection
                             continue
-                        # Stale or unknown token: notify and ignore
-                        wfile = conn.makefile("w")
-                        # Properly framed error packet to avoid client framing errors
-                        io_send(wfile, 0, msg=f"ERR Unknown token {candidate}")
-                        print(f"[WARN] Unknown token {candidate}, ignoring")
+                        # Fresh join: remember candidate token for later lobby enqueue
+                        token_str = candidate
                 # After reconnect handshake, if a game is running, attach as spectator
                 if current_session and current_session.is_alive() and session_ready.is_set():
                     current_session.spec.add(conn)
                     print("[INFO] Spectator attached")
                     continue
-                # Fresh join → add to lobby with no token
-                lobby.append((conn, None))
-                print(f"[DEBUG] Client added to lobby (len={len(lobby)})")
+                # Fresh join → add to lobby with client PID token (if any)
+                lobby.append((conn, token_str))
+                print(f"[DEBUG] Client added to lobby with token {token_str!r} (len={len(lobby)})")
                 _try_pair_lobby()
         finally:
             for sock, _ in lobby:

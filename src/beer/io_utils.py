@@ -42,23 +42,27 @@ def send_grid(w: TextIO, seq: int, board: Board, *, reveal: bool = False) -> boo
 
 
 def safe_readline(
-    r: TextIO,
-    on_disconnect: Callable[[], bool],  # should return True on successful reconnect
-    retry: bool = True,
+    reader: TextIO,
+    on_disconnect: Callable[[], bool],
 ) -> str:
     """
-    Read one line; if EOF or socket error, invoke *on_disconnect* once.
-    If that returns True, retry the read exactly once.
+    Read one line; if EOF or socket error, invoke on_disconnect once.
+    Retries exactly once if on_disconnect returns True.
     """
-    try:
-        line = r.readline()
-    except (OSError, ConnectionResetError):
-        line = ""
-    if line == "" and retry:
-        if on_disconnect():
-            # underlying reader has changed – call ourselves recursively once
-            return safe_readline(r, on_disconnect, retry=False)
-    return line
+    attempts = 0
+    while True:
+        try:
+            line = reader.readline()
+        except (OSError, ConnectionResetError):
+            line = ""
+        if line:
+            return line
+        # If first failure and reconnect succeeds, retry once
+        if attempts == 0 and on_disconnect():
+            attempts += 1
+            continue
+        # No data: genuine disconnect or second failure
+        return ""
 
 
 # Helper to broadcast chat messages to multiple clients
@@ -88,9 +92,10 @@ def recv_turn(
     import select as _select, time as _time
 
     start = _time.time()
-    att_sock = r.buffer.raw._sock  # type: ignore[attr-defined]
-    def_sock = defender_r.buffer.raw._sock  # type: ignore[attr-defined]
     while True:
+        # Refresh socket FDs in case of reconnect
+        att_sock = r.buffer.raw._sock  # type: ignore[attr-defined]
+        def_sock = defender_r.buffer.raw._sock  # type: ignore[attr-defined]
         remaining = TURN_TIMEOUT - (_time.time() - start)
         if remaining <= 0:
             return None
@@ -102,9 +107,13 @@ def recv_turn(
             writer = w if file is r else defender_w
             slot = 1 if file is session.p1_file_r else 2
             raw_line = safe_readline(file, lambda: session.recon.wait(slot))
+            # If no data, attempt non-blocking rebind and retry
+            if not raw_line and session._rebind_if_needed(slot):
+                # Refresh I/O handles for this slot
+                file, writer = session._file_pair(slot)
+                raw_line = safe_readline(file, lambda: session.recon.wait(slot))
+            # If still no line, genuine timeout/disconnect
             if not raw_line:
-                if file is defender_r:
-                    return "DEFENDER_LEFT"
                 return None
             line = raw_line.strip()
             # Spectator command guard (G-8)

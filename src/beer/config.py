@@ -74,7 +74,7 @@ DEFAULT_PORT: int = int(os.getenv("BEER_PORT", "61337"))
 # BEER_TURN_TIMEOUT: Timeout (in seconds) for a player to issue a FIRE command.
 #   Defaults to 180 (3 minutes).
 #   Example: export BEER_TURN_TIMEOUT=60
-TURN_TIMEOUT: int = int(os.getenv("BEER_TURN_TIMEOUT", "180"))
+TURN_TIMEOUT: int = int(os.getenv("BEER_TURN_TIMEOUT", "600"))
 
 # BEER_PLACE_TIMEOUT: Timeout (in seconds) for a player to complete manual ship placement.
 #   Defaults to 30.

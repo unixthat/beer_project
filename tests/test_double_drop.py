@@ -15,7 +15,7 @@ class DummyReconFail:
         # Always fail to reconnect
         self.wait_calls.append(idx)
         return False
-    def take_new_socket(self, idx):
+    def take_new_socket(self, idx): 
         # Should not be called on failure
         raise AssertionError("take_new_socket should not be called on failed reconnection")
 
@@ -84,3 +84,20 @@ def test_reconnect_and_rebind():
     assert sess.rebind_calls == [(1, 'sock1')]
     assert sess.conclude_calls == []
     assert recon.wait_calls == [1]
+
+
+def test_mid_turn_resume(game_factory, reconnect_client):
+    # Test that a mid-turn reconnect resumes game for attacker
+    p1, p2, sess = game_factory()
+    # Prime the game by firing first shot
+    p1.send("FIRE A1\n")
+    _ = p1.recv_until("GRID")
+    # Drop attacker mid-turn
+    p2.close()
+    # Reconnect attacker
+    p2 = reconnect_client(sess.token_p2)
+    p2.send("FIRE B1\n")
+    out = p1.recv_until("HIT")
+    assert "HIT" in out  # game continued
+
+

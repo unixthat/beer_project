@@ -31,13 +31,11 @@ logging.basicConfig(level=logging.DEBUG if _cfg.DEBUG else logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-# ------------------- PID-token persistence -------------------
-TOKEN_FILE = Path.home() / ".beer_pidtoken"
-if TOKEN_FILE.exists():
-    TOKEN = TOKEN_FILE.read_text().strip()
-else:
-    TOKEN = f"PID{os.getpid()}"
-    TOKEN_FILE.write_text(TOKEN)
+# ------------------- PID-token handshake token -------------------
+# Handshake token: default to the parent shell's PID for reconnect persistence, overrideable by BEER_TOKEN env var
+TOKEN = os.getenv("BEER_TOKEN", f"PID{os.getppid()}")
+# Inform user of the token in use
+print(f"[INFO] Using handshake TOKEN='{TOKEN}'")
 
 # ---------------------------- receiver -----------------------------
 
@@ -120,7 +118,7 @@ def _prompt() -> None:
 
 def _recv_loop(sock: socket.socket, stop_evt: threading.Event, verbose: int) -> None:  # pragma: no cover
     """Continuously print messages from the server (framed packets only)."""
-    global TOKEN  # allow resetting on unknown-token errors
+    global TOKEN
     br = sock.makefile("rb")  # buffered reader
 
     last_opp: Optional[list[str]] = None
@@ -178,11 +176,6 @@ def _recv_loop(sock: socket.socket, stop_evt: threading.Event, verbose: int) -> 
             print(f"YOU WON with {shots} shots")
         else:
             print(f"YOU LOST – opponent won with {shots} shots")
-        # Clean up PID-token cache after match conclusion
-        try:
-            TOKEN_FILE.unlink(missing_ok=True)
-        except Exception:
-            pass
 
     handlers: Dict[str, Callable[[dict], None]] = {
         "spec_grid": h_spec_grid,
@@ -226,13 +219,7 @@ def _recv_loop(sock: socket.socket, stop_evt: threading.Event, verbose: int) -> 
                         # Extract token and persist it
                         parts = msg.split(maxsplit=2)
                         if len(parts) >= 3:
-                            new_token = parts[2]
-                            try:
-                                TOKEN_FILE.write_text(new_token)
-                                global TOKEN  # update in-memory TOKEN
-                                TOKEN = new_token
-                            except Exception:
-                                pass
+                            TOKEN = parts[2]
                         print(msg)
                         continue
                     # START opp: just display
@@ -241,17 +228,8 @@ def _recv_loop(sock: socket.socket, stop_evt: threading.Event, verbose: int) -> 
                         continue
                     # Handle unknown-token error silently: reset persistent token, do not display
                     if msg.startswith("ERR Unknown token "):
-                        try:
-                            TOKEN_FILE.unlink(missing_ok=True)
-                        except Exception:
-                            pass
-                        # Persist new default token for next connection (will be overwritten on START you)
-                        default_tok = f"PID{os.getpid()}"
-                        TOKEN = default_tok
-                        try:
-                            TOKEN_FILE.write_text(default_tok)
-                        except Exception:
-                            pass
+                        # Reset to this process's parent (shell) PID token for fresh join
+                        TOKEN = f"PID{os.getppid()}"
                         continue
                     # INFO and other ERR messages shown
                     if msg.startswith("INFO ") or (msg.startswith("ERR ") and not msg.startswith("ERR Unknown token ")) or msg.startswith("[INFO] "):
@@ -328,7 +306,7 @@ def _client(s, args):
     while True:
         try:
             s.connect(addr)
-            # Send PID-token handshake immediately
+            # Always send PID handshake for initial join or reconnect
             try:
                 s.sendall(f"TOKEN {TOKEN}\n".encode())
             except Exception:

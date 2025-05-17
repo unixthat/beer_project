@@ -154,10 +154,9 @@ class GameSession(threading.Thread):
         # prepare safe_read callback with rebind for Player 1
         def _safe_read_1(_: TextIO) -> str:
             line = safe_readline(self.p1_file_r, lambda: self.recon.wait(1))
-            if not line and self.recon.wait(1):
-                new_sock = self.recon.take_new_socket(1)
-                self._rebind_slot(1, new_sock)
-                return safe_readline(self.p1_file_r, lambda: self.recon.wait(1))
+            if not line:
+                self._rebind_if_needed(1)
+                line = safe_readline(self.p1_file_r, lambda: self.recon.wait(1))
             return line
 
         # Player 1 placement
@@ -173,10 +172,9 @@ class GameSession(threading.Thread):
         # prepare safe_read callback with rebind for Player 2
         def _safe_read_2(_: TextIO) -> str:
             line = safe_readline(self.p2_file_r, lambda: self.recon.wait(2))
-            if not line and self.recon.wait(2):
-                new_sock = self.recon.take_new_socket(2)
-                self._rebind_slot(2, new_sock)
-                return safe_readline(self.p2_file_r, lambda: self.recon.wait(2))
+            if not line:
+                self._rebind_if_needed(2)
+                line = safe_readline(self.p2_file_r, lambda: self.recon.wait(2))
             return line
 
         # Player 2 placement
@@ -215,19 +213,32 @@ class GameSession(threading.Thread):
             while True:
                 # Poll both sockets for disconnect before each turn (handle simultaneous drops)
                 dropped_slots: list[int] = []
-                # Check each player slot for immediate disconnect
-                for idx, r, w in [(1, self.p1_file_r, self.p1_file_w), (2, self.p2_file_r, self.p2_file_w)]:
+                for idx in (1, 2):
+                    # Get current r/w for this slot
+                    r, w = self._file_pair(idx)
                     sock = r.buffer.raw._sock
+                    # Poll socket for disconnect before each turn
                     readable, _, _ = select.select([sock], [], [], 0)
                     if readable:
-                        # Peek for disconnect without recovery
-                        line = safe_readline(r, lambda: False, retry=False)
+                        print(f"[INFO] Socket readable for player {idx} during poll — checking for EOF")
+                        # Peek for disconnect, allowing reconnect window
+                        line = safe_readline(r, lambda: self.recon.wait(idx))
+                        # If no data but a new socket arrived, rebind and refresh handles
+                        if not line and self._rebind_if_needed(idx):
+                            r, w = self._file_pair(idx)
+                            sock = r.buffer.raw._sock
+                            line = safe_readline(r, lambda: self.recon.wait(idx))
+                        # If still no data, mark slot dropped
                         if not line:
+                            print(f"[INFO] EOF/no-data on player {idx}'s socket detected")
                             dropped_slots.append(idx)
                 if dropped_slots:
+                    print(f"[INFO] Disconnected slots detected: {dropped_slots}")
                     # Delegate to helper; if it concludes match, exit run
                     if self._handle_disconnects(dropped_slots):
                         return
+                    # After handling disconnects (reconnect or promotion), restart loop
+                    continue
                 # Process buffered lines if any
                 self._line_buffer.clear()
 
@@ -327,8 +338,10 @@ class GameSession(threading.Thread):
                     self.board_p1,
                     self.board_p2,
                 )
-                if not ok1 or not ok2:
-                    winner = 2 if not ok1 else 1
+                # If active player's grid write fails, treat as timeout/disconnect;
+                # ignore failures sending to the opponent to avoid premature match end.
+                if not ok1:
+                    winner = 2
                     self._conclude(winner, reason="timeout/disconnect")
                     return
 
@@ -367,6 +380,13 @@ class GameSession(threading.Thread):
 
     def _file_pair(self, player_idx: int):
         return (self.p1_file_r, self.p1_file_w) if player_idx == 1 else (self.p2_file_r, self.p2_file_w)
+
+    def _rebind_if_needed(self, slot: int) -> bool:
+        """If a new socket has arrived for slot, swap to it and return True."""
+        ok, sock = self.recon.try_rebind(slot)
+        if ok:
+            self._rebind_slot(slot, sock)
+        return ok
 
     def _conclude(self, winner: int, *, reason: str) -> None:
         print(f"[DEBUG] _conclude: winner={winner}, reason={reason}")
@@ -417,10 +437,12 @@ class GameSession(threading.Thread):
           - single fail: opponent wins, reason="timeout/disconnect"
         Return True if the match concluded and run should exit, False otherwise.
         """
+        for idx in dropped_slots:
+            print(f"[INFO] Player {idx} disconnected – awaiting reconnect")
         failed: list[int] = []
         for idx in dropped_slots:
-            print(f"[DEBUG] disconnect on player {idx}")
             if self.recon.wait(idx):
+                print(f"[INFO] Player {idx} reconnected – resuming match")
                 new_sock = self.recon.take_new_socket(idx)
                 self._rebind_slot(idx, new_sock)
                 continue

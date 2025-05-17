@@ -12,6 +12,7 @@ from .io_utils import send as io_send, send_grid
 from .coord_utils import COORD_RE
 import time
 from . import config as _cfg
+import select
 
 class PlacementTimeout(Exception):
     """Raised when manual ship placement exceeds the allowed time."""
@@ -20,9 +21,21 @@ class PlacementTimeout(Exception):
 def run(board: Board, r: TextIO, w: TextIO, safe_read: Callable[[TextIO], str]) -> bool:
     # Ask preference
     io_send(w, 0, msg="INFO Manual placement? [y/N]")
+    # Wait up to PLACEMENT_TIMEOUT for the manual-placement answer
+    sock = getattr(r.buffer.raw, '_sock', None)
+    if sock is not None:
+        readable, _, _ = select.select([sock], [], [], _cfg.PLACEMENT_TIMEOUT)
+    else:
+        readable = [True]
+    if not readable:
+        # No response in time: auto-decline manual placement
+        board.place_ships_randomly()
+        return True
     pref = safe_read(r).strip().upper()
     if not pref.startswith("Y"):
-        return True  # keep random placement
+        # User declined manual placement -> perform automatic random placement
+        board.place_ships_randomly()
+        return True
 
     # Clear board
     board.reset()

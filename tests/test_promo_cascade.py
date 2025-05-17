@@ -64,3 +64,12 @@ def test_spectator_hub_promote_and_empty():
     # Verify notify_fn was called on add and promote steps
     # At least the initial add notifications
     assert any(msg == 'INFO YOU ARE NOW SPECTATING' for _, msg, _ in notify_calls)
+
+    def test_midturn_reconnect(tmp_game):
+        p1, p2, sess = tmp_game
+        sess.fire(p1, "FIRE A1")
+        p2.close()                         # drop mid-turn
+        p2 = reconnect_client(sess.token_p2)
+        p2.send("FIRE B1\n")               # should be accepted
+        assert "HIT" in p1.recv_until("GRID")
+
