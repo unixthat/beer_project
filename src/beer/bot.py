@@ -294,8 +294,8 @@ def main() -> None:  # pragma: no cover
                 receiver.start()
 
                 # wait for game to finish (stop_evt set in _on_end)
-                while not stop_evt.is_set():
-                    receiver.join(timeout=0.5)
+            while not stop_evt.is_set():
+                receiver.join(timeout=0.5)
         except KeyboardInterrupt:
             logger.info("Bot interrupted by user – quitting")
             break

@@ -22,6 +22,7 @@ from .common import (
 )
 from .battleship import SHIP_LETTERS
 from . import config as _cfg
+from .cheater import Cheater
 
 HOST = _cfg.DEFAULT_HOST
 PORT = _cfg.DEFAULT_PORT
@@ -121,7 +122,9 @@ def _prompt() -> None:
 _prompt_shown = False
 
 
-def _recv_loop(sock: socket.socket, stop_evt: threading.Event, verbose: int) -> None:  # pragma: no cover
+def _recv_loop(
+    sock: socket.socket, stop_evt: threading.Event, verbose: int, cheat_mode: bool, cheater: Cheater
+) -> None:  # pragma: no cover
     global _prompt_shown
 
     """Continuously print messages from the server (framed packets only)."""
@@ -145,9 +148,9 @@ def _recv_loop(sock: socket.socket, stop_evt: threading.Event, verbose: int) -> 
     def h_grid(obj: dict) -> None:
         rows = obj["rows"]
         if _is_reveal_grid(rows):
-            # store own rows for later dual render
             nonlocal last_own
             last_own = rows
+            # do not seed cheater from own grid reveal
         else:
             nonlocal last_opp
             last_opp = rows
@@ -187,12 +190,25 @@ def _recv_loop(sock: socket.socket, stop_evt: threading.Event, verbose: int) -> 
         else:
             print(f"YOU LOST – opponent won with {shots} shots")
 
+    def h_opp_grid(obj: dict) -> None:
+        # Reveal hidden opponent grid only in --win (cheat) mode
+        if not cheat_mode:
+            return
+        rows = obj["rows"]
+        # Seed the cheater logic
+        cheater.feed_grid(rows)
+        # Display the hidden grid
+        if verbose >= 0:
+            print("\n[Opponent Hidden Ships]")
+            _print_grid(rows)
+
     handlers: Dict[str, Callable[[dict], None]] = {
         "spec_grid": h_spec_grid,
         "grid": h_grid,
         "shot": h_shot,
         "chat": h_chat,
         "end": h_end,
+        "opp_grid": h_opp_grid,
     }
 
     try:
@@ -213,7 +229,7 @@ def _recv_loop(sock: socket.socket, stop_evt: threading.Event, verbose: int) -> 
                 stop_evt.set()
                 break
 
-            if ptype == PacketType.GAME and isinstance(obj, dict):
+            if ptype in (PacketType.GAME, PacketType.OPP_GRID) and isinstance(obj, dict):
                 if _cfg.DEBUG:
                     logger.debug("Recv packet %s", obj)
                 p = obj.get("type")
@@ -253,8 +269,10 @@ def _recv_loop(sock: socket.socket, stop_evt: threading.Event, verbose: int) -> 
                     ):
                         print(f"\r{msg}")
                         # Reset prompt when the shooter should act again
-                        if msg.startswith("INFO Your turn") or msg.startswith("INFO Opponent has reconnected"):
+                        if msg.startswith("INFO YOUR TURN") or msg.startswith("INFO Opponent has reconnected"):
                             _prompt_shown = False
+                            if cheat_mode and cheater:
+                                cheater.notify_turn()
                         continue
                     # Raw/unrecognized frames at verbose>=1
                     if verbose >= 1 and "raw" not in _cfg.QUIET_CATEGORIES:
@@ -301,6 +319,11 @@ def main() -> None:  # pragma: no cover – CLI entry
         action="store_true",
         help="Suppress most output",
     )
+    parser.add_argument(
+        "--win",
+        action="store_true",
+        help="Cheat mode: auto‐fire every opponent ship cell exactly once",
+    )
     args = parser.parse_args()
 
     # Set the BEER_DEBUG environment variable based on the --debug flag
@@ -317,11 +340,11 @@ def main() -> None:  # pragma: no cover – CLI entry
         print("[INFO] Encryption enabled in client")
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        _client(s, args)
+        _client(s, args, cheat_mode=args.win)
 
 
 # Internal client loop invoked from main
-def _client(s, args):
+def _client(s, args, cheat_mode: bool = False):
     global _prompt_shown
 
     addr = (args.host, args.port)
@@ -354,7 +377,8 @@ def _client(s, args):
             return
 
     stop_evt = threading.Event()
-    receiver = threading.Thread(target=_recv_loop, args=(s, stop_evt, _VERBOSE_LEVEL), daemon=True)
+    cheater = Cheater() if cheat_mode else None
+    receiver = threading.Thread(target=_recv_loop, args=(s, stop_evt, _VERBOSE_LEVEL, cheat_mode, cheater), daemon=True)
     receiver.start()
 
     wfile = s.makefile("w")
@@ -365,14 +389,27 @@ def _client(s, args):
                 print("[INFO] Disconnected from server. Exiting client.")
                 break
 
-            # Non-blocking prompt when server disconnected: input would still block.
-            # Use select on stdin to avoid hang after disconnection.
-            import sys
-            import select
+            # auto-fire in win mode (only when cheater was notified)
+            if cheat_mode and cheater and cheater._seeded:
+                coord = cheater.next_shot()
+                if coord is None:
+                    # not ready or out of targets
+                    if not cheater._turn_ready:
+                        continue
+                    print("[INFO] All ships fired, exiting cheat-client.")
+                    break
+                wfile.write(f"FIRE {coord}\n")
+                wfile.flush()
+                _prompt_shown = False
+                continue
 
+            # normal prompt…
             if not _prompt_shown:
                 _prompt()
-                _prompt_shown = True  # type: ignore[var-annotated]
+                _prompt_shown = True
+
+            import sys
+            import select
 
             ready, _, _ = select.select([sys.stdin], [], [], 0.5)
             if not ready:
@@ -381,6 +418,10 @@ def _client(s, args):
             _prompt_shown = False
             if not user_input:
                 continue
+            # allow clean exit while waiting in lobby
+            if user_input.upper() == "QUIT":
+                print("[INFO] Exiting client per user request.")
+                break
             if user_input.startswith("/chat "):
                 user_input = f"CHAT {user_input[6:]}"
             wfile.write(user_input + "\n")

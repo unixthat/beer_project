@@ -17,22 +17,44 @@ import socket
 
 
 def send(
-    w: TextIO,
-    seq: int,
-    ptype: PacketType = PacketType.GAME,
-    *,
-    msg: str | None = None,
-    obj: Any | None = None
+    w: TextIO, seq: int, ptype: PacketType = PacketType.GAME, *, msg: str | None = None, obj: Any | None = None
 ) -> bool:
+    # Debug print of send parameters
     print(f"[DBG send] seq={seq} msg={msg} obj={obj}")
     payload = obj if obj is not None else {"msg": msg}
+    # Attempt to detect EOF on underlying socket, if available
+    sock = None
+    try:
+        # type: ignore[attr-defined]
+        sock = w.buffer.raw._sock
+    except Exception:
+        sock = None
+    if sock:
+        # non-blocking peek to detect closed peer
+        try:
+            data = sock.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT)
+            if len(data) == 0:
+                # peer closed connection
+                return False
+        except BlockingIOError:
+            # no data available, assume connection is alive
+            pass
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+            # peer reset/closed
+            return False
+        except OSError:
+            # e.g. socket not connected; skip EOF check
+            pass
     try:
         send_pkt(w.buffer, ptype, seq, payload)  # type: ignore[arg-type]
         w.buffer.flush()
         print(f"[DBG send] success seq={seq}")
         return True
+    except (BrokenPipeError, ConnectionResetError):
+        # peer closed or reset during send
+        return False
     except Exception as e:
-        print(f"[DBG send] error seq={seq} error={e}")
+        print(f"[ERROR] send failed: {e}")
         return False
 
 
@@ -49,6 +71,17 @@ def grid_rows(board: Board, *, reveal: bool = False) -> List[str]:
 def send_grid(w: TextIO, seq: int, board: Board, *, reveal: bool = False) -> bool:
     print(f"[DBG send_grid] seq={seq} reveal={reveal}")
     return send(w, seq, PacketType.GAME, obj={"type": "grid", "rows": grid_rows(board, reveal=reveal)})
+
+
+def send_opp_grid(w: TextIO, seq: int, board: Board) -> bool:
+    """Reveal the _opponent_ ship map (hidden_grid) to a client."""
+    print(f"[DBG send_opp_grid] seq={seq} reveal_opponent")
+    return send(
+        w,
+        seq,
+        PacketType.OPP_GRID,
+        obj={"type": "opp_grid", "rows": grid_rows(board, reveal=True)},
+    )
 
 
 def safe_readline(
@@ -90,36 +123,28 @@ def recv_turn(
 ) -> Any:
     import select as _select, time as _time
 
+    # Debug prints removed; internal logic unchanged
+    first_select = False
+
     start = _time.time()
-    print("[DBG recv_turn] start")
     while True:
         att_sock = r.buffer.raw._sock  # type: ignore[attr-defined]
         def_sock = defender_r.buffer.raw._sock  # type: ignore[attr-defined]
         remaining = TURN_TIMEOUT - (_time.time() - start)
-        print(f"[DBG recv_turn] remaining={remaining}")
         if remaining <= 0:
-            print("[DBG recv_turn] timeout")
             return None
         readable, _, _ = _select.select([att_sock, def_sock], [], [], remaining)
-        print(f"[DBG recv_turn] readable={readable}")
         if att_sock in readable and def_sock in readable:
             readable.sort(key=lambda s: 0 if s is att_sock else 1)
-            print("[DBG recv_turn] sorted for attacker priority")
         if not readable:
-            print("[DBG recv_turn] no readable sockets")
             return None
         for sock in readable:
-            role = 'attacker' if sock is att_sock else 'defender'
-            print(f"[DBG recv_turn] handling socket for {role}")
             file = r if sock is att_sock else defender_r
             writer = w if file is r else defender_w
             slot = 1 if file is session.p1_file_r else 2
 
-            # ---- cursor-fix-reconnect ▶ non-destructive EOF probe ----
-            if session._is_eof(sock):
-                if sock is def_sock:
-                    return "DEFENDER_LEFT"
-                # attacker dropped mid-turn
+            # ---- only the attacker socket ever "leaves" on empty/EOF ----
+            if sock is att_sock and session._is_eof(sock):
                 return "ATTACKER_LEFT"
 
             # Now there is actual data ready: read it
@@ -128,39 +153,32 @@ def recv_turn(
             except (OSError, ConnectionResetError):
                 raw_line = ""
             if not raw_line:
-                if sock is def_sock:
-                    return "DEFENDER_LEFT"
-                return "ATTACKER_LEFT"
+                # only attacker empties are left events; defender just falls through
+                if sock is att_sock:
+                    return "ATTACKER_LEFT"
+                continue
 
             line = raw_line.strip()
-            print(f"[DBG recv_turn] command line={line!r}")
-            if session.spec.is_spectator(file):
-                print("[DBG recv_turn] spectator command")
-                send(writer, session.io_seq, msg="ERR Spectators cannot issue commands")
-                session.io_seq += 1
-                continue
             try:
                 cmd = parse_command(line)
-                print(f"[DBG recv_turn] parsed cmd={cmd}")
             except CommandParseError as e:
-                print(f"[DBG recv_turn] parse error={e}")
                 send(writer, session.io_seq, msg=f"ERR {e}")
                 session.io_seq += 1
                 continue
             if sock is def_sock:
-                print("[DBG recv_turn] defender out-of-turn")
                 if isinstance(cmd, ChatCommand):
-                    print(f"[DBG recv_turn] defender chat {cmd.text}")
-                    session.io_seq = chat_broadcast([
-                        session.p1_file_w, session.p2_file_w
-                    ], session.io_seq, 2, cmd.text, {"name": "P2", "msg": cmd.text})
+                    session.io_seq = chat_broadcast(
+                        [session.p1_file_w, session.p2_file_w],
+                        session.io_seq,
+                        2,
+                        cmd.text,
+                        {"name": "P2", "msg": cmd.text},
+                    )
                     continue
                 if isinstance(cmd, QuitCommand):
-                    print("[DBG recv_turn] defender quit concession")
                     session._conclude(1, reason="concession")
                     return None
                 if isinstance(cmd, FireCommand):
-                    print("[DBG recv_turn] defender attempted FIRE out-of-turn")
                     send(defender_w, session.io_seq, msg="ERR Not your turn – wait for your turn prompt")
                     session.io_seq += 1
                     continue
@@ -168,18 +186,15 @@ def recv_turn(
                 session.io_seq += 1
                 continue
             if isinstance(cmd, ChatCommand):
-                print(f"[DBG recv_turn] attacker chat {cmd.text}")
-                session.io_seq = chat_broadcast([
-                    session.p1_file_w, session.p2_file_w
-                ], session.io_seq, 1, cmd.text, {"name": "P1", "msg": cmd.text})
+                session.io_seq = chat_broadcast(
+                    [session.p1_file_w, session.p2_file_w], session.io_seq, 1, cmd.text, {"name": "P1", "msg": cmd.text}
+                )
                 continue
             if isinstance(cmd, QuitCommand):
-                print("[DBG recv_turn] attacker quit")
                 return "QUIT"
             if isinstance(cmd, FireCommand):
-                print(f"[DBG recv_turn] attacker FIRE {(cmd.row, cmd.col)}")
                 return (cmd.row, cmd.col)
-            print("[DBG recv_turn] unknown command fallback")
+            # unknown command fallback
             send(w, session.io_seq, msg="ERR Unknown error processing command")
             session.io_seq += 1
             continue

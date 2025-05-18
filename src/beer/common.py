@@ -54,6 +54,7 @@ class PacketType(int, enum.Enum):
     CHAT = 1
     ACK = 2
     ERROR = 3
+    OPP_GRID = 4
 
 
 class FrameError(Exception):

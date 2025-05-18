@@ -40,11 +40,20 @@ import threading
 import time
 import select
 from typing import TextIO, Any, Callable, List
+import logging
 
 from .battleship import Board, SHIPS, parse_coordinate, SHIP_LETTERS
 from .common import PacketType
-from .io_utils import send as io_send, send_grid, safe_readline, chat_broadcast, recv_turn, refresh_views
-from .spectator_hub import SpectatorHub
+from .io_utils import (
+    send as io_send,
+    send_grid,
+    send_opp_grid,
+    safe_readline,
+    chat_broadcast,
+    recv_turn,
+    refresh_views,
+    grid_rows,
+)
 from .reconnect_controller import ReconnectController
 from .placement_wizard import run as place_ships
 from . import config as _cfg
@@ -58,7 +67,15 @@ class GameSession(threading.Thread):
     """Thread managing a single two-player match."""
 
     def __init__(
-        self, p1: socket.socket, p2: socket.socket, *, token_p1: str, token_p2: str, ships=None, session_ready=None
+        self,
+        p1: socket.socket,
+        p2: socket.socket,
+        *,
+        token_p1: str,
+        token_p2: str,
+        ships=None,
+        session_ready=None,
+        broadcast: Callable[[str | None, Any | None], None],
     ):
         """Create a thread that manages a full two-player match.
 
@@ -110,13 +127,13 @@ class GameSession(threading.Thread):
         self._notify = _notify
         # Convenience for reconnect notifications to player slots
         self._notify_player = lambda slot, txt: self._notify(self.p1_file_w if slot == 1 else self.p2_file_w, txt)
-        # Spectator management
-        self.spec = SpectatorHub(self._notify)
-        # Reconnect controller (handles wait windows and token reattachment)
-        from .server import PID_REGISTRY
+        # Broadcast callback for all waiting clients
+        self._broadcast = broadcast
 
+        # Initialize reconnect controller (registers both tokens)
+        from .server import PID_REGISTRY
         self.recon = ReconnectController(
-            _cfg.RECONNECT_TIMEOUT,
+            TURN_TIMEOUT,
             self._notify_player,
             self.token_p1,
             self.token_p2,
@@ -139,9 +156,6 @@ class GameSession(threading.Thread):
         self._line_buffer: dict[int, str] = {}
         # Keeps track of whose turn it is (1 or 2); set properly in run()
         self.current: int | None = None
-
-        # Flag to avoid double-prompt immediately after a reconnect
-        self._just_rebound = False
 
     # -------------------- helpers --------------------
     # Removed duplicate _send and _send_grid methods; using io_utils.send and send_grid directly
@@ -203,8 +217,15 @@ class GameSession(threading.Thread):
             self.board_p1,
             self.board_p2,
         )
-        # Snapshot for any connected spectators
-        self.spec.snapshot(self.board_p1, self.board_p2)
+        # Reveal opponent hidden grid for cheat clients
+        send_opp_grid(self.p1_file_w, self.io_seq, self.board_p2)
+        self.io_seq += 1
+        send_opp_grid(self.p2_file_w, self.io_seq, self.board_p1)
+        self.io_seq += 1
+        # Snapshot for any waiting clients
+        rows_p1 = grid_rows(self.board_p1, reveal=True)
+        rows_p2 = grid_rows(self.board_p2, reveal=True)
+        self._broadcast(None, {"type": "spec_grid", "rows_p1": rows_p1, "rows_p2": rows_p2})
 
         # Signal ready for spectators
         if self.session_ready:
@@ -220,33 +241,19 @@ class GameSession(threading.Thread):
             self.current = current_player
 
             while True:
-                # Poll both sockets for disconnect before each turn (handle simultaneous drops)
+                # Poll both sockets for real disconnect before each turn
                 dropped_slots: list[int] = []
                 for idx in (1, 2):
-                    # Get current r/w for this slot
-                    r, w = self._file_pair(idx)
+                    r, _ = self._file_pair(idx)
                     sock = r.buffer.raw._sock
-                    # Poll socket for disconnect before each turn
-                    readable, _, _ = select.select([sock], [], [], 0)
-                    if readable:
-                        print(f"[INFO] Socket readable for player {idx} during poll — checking for EOF")
-                        # Peek for disconnect, allowing reconnect window
-                        line = safe_readline(r, lambda: self.recon.wait(idx))
-                        # If no data but a new socket arrived, rebind and refresh handles
-                        if not line and self._rebind_if_needed(idx):
-                            r, w = self._file_pair(idx)
-                            sock = r.buffer.raw._sock
-                            line = safe_readline(r, lambda: self.recon.wait(idx))
-                        # If still no data, mark slot dropped
-                        if not line:
-                            print(f"[INFO] EOF/no-data on player {idx}'s socket detected")
-                            dropped_slots.append(idx)
+                    # Peek for EOF only (do not consume any data)
+                    if self._is_eof(sock):
+                        logging.info(f"EOF on player {idx}'s socket detected")
+                        dropped_slots.append(idx)
                 if dropped_slots:
-                    print(f"[INFO] Disconnected slots detected: {dropped_slots}")
-                    # Delegate to helper; if it concludes match, exit run
+                    logging.info(f"Disconnected slots detected: {dropped_slots}")
                     if self._handle_disconnects(dropped_slots):
                         return
-                    # After handling disconnects (reconnect or promotion), restart loop
                     continue
                 # Process buffered lines if any
                 self._line_buffer.clear()
@@ -256,31 +263,14 @@ class GameSession(threading.Thread):
                 defender_idx = 2 if current_player == 1 else 1
                 defender_r, defender_w = self._file_pair(defender_idx)
 
-                # Request coordinate—only prompt here if we didn't just prompt in _rebind_slot()
-                if not self._just_rebound:
-                    self._prompt_current_player()
-                else:
-                    # skip this one, reset the flag
-                    self._just_rebound = False
+                # Request coordinate—always prompt exactly once here
+                self._prompt_current_player()
                 self._emit(Event(Category.TURN, "prompt", {"player": current_player}))
 
                 coord = recv_turn(self, attacker_r, attacker_w, defender_r, defender_w)
-                print(f"[DEBUG SERVER] recv_turn returned: {coord!r}")
-                if coord == "DEFENDER_LEFT":
-                    print(f"[INFO] Defender {defender_idx} left mid-turn")
-                    # defender dropped mid-turn → try reconnect first
-                    if self.recon.wait(defender_idx):
-                        new_sock = self.recon.take_new_socket(defender_idx)
-                        self._rebind_slot(defender_idx, new_sock)
-                        continue
-                    while not self.spec.promote(defender_idx, self):
-                        if self.spec.empty():
-                            winner = 2 if current_player == 1 else 1
-                            self._conclude(winner, reason="timeout")
-                            return
-                    continue
-                elif coord == "ATTACKER_LEFT":
-                    print(f"[INFO] Attacker {current_player} left mid-turn")
+                logging.debug(f"recv_turn returned: {coord!r}")
+                if coord == "ATTACKER_LEFT":
+                    logging.info(f"Attacker {current_player} left mid-turn")
                     # attacker dropped mid-turn → try reconnect
                     if self.recon.wait(current_player):
                         new_sock = self.recon.take_new_socket(current_player)
@@ -291,19 +281,20 @@ class GameSession(threading.Thread):
                     return
                 elif coord is None:
                     # genuine timeout/no-EOF case → concession
+                    logging.info(f"Player {current_player} timed out – ending match")
                     self.drop_and_deregister(current_player, reason="timeout")
                     return
 
                 if coord == "QUIT":
-                    # Player conceded mid-turn → end this session.
-                    # Spectator promotion into a fresh match is handled by the lobby.
+                    # Player conceded mid-turn → end session
+                    logging.info(f"Player {current_player} conceded – ending match")
                     self.drop_and_deregister(current_player, reason="concession")
                     return
 
                 row, col = coord  # tuple[int, int]
                 # Prevent duplicate shots: check if this player already fired here
                 key = (row, col)
-                print(f"[DBG] Broadcasting shot for P{self.current}: {(row, col)}")
+                logging.debug(f"Broadcasting shot for P{self.current}: {(row, col)}")
 
                 if key in self._fired[current_player]:
                     # Prevent duplicate shots: prompt error
@@ -331,8 +322,9 @@ class GameSession(threading.Thread):
                 self.io_seq += 1
                 io_send(defender_w, self.io_seq, msg=defender_msg)
                 self.io_seq += 1
-                # Send per-shot messages to all spectators via hub in one pass
-                self.spec.broadcast_msgs(attacker_msg, defender_msg)
+                # Broadcast per-shot messages to all waiting clients
+                self._broadcast(attacker_msg, None)
+                self._broadcast(defender_msg, None)
 
                 # Count valid shot (hit or miss)
                 if result in {"hit", "miss"}:
@@ -375,14 +367,18 @@ class GameSession(threading.Thread):
                 # After every *two* half-turns broadcast a fresh dual-board to spectators
                 self._half_turn_counter += 1
                 if self._half_turn_counter % 2 == 0:
-                    self.spec.snapshot(self.board_p1, self.board_p2)
+                    rows_p1 = grid_rows(self.board_p1, reveal=True)
+                    rows_p2 = grid_rows(self.board_p2, reveal=True)
+                    self._broadcast(None, {"type": "spec_grid", "rows_p1": rows_p1, "rows_p2": rows_p2})
 
                 # Next player's turn
                 current_player = 2 if current_player == 1 else 1
                 self.current = current_player
         finally:
-            # One last board snapshot for any connected spectators.
-            self.spec.snapshot(self.board_p1, self.board_p2)
+            # One last board snapshot for any waiting clients
+            rows_p1 = grid_rows(self.board_p1, reveal=True)
+            rows_p2 = grid_rows(self.board_p2, reveal=True)
+            self._broadcast(None, {"type": "spec_grid", "rows_p1": rows_p1, "rows_p2": rows_p2})
             # Cleanup reconnect tokens
             from .server import PID_REGISTRY
 
@@ -403,9 +399,7 @@ class GameSession(threading.Thread):
 
         # After rebinding, push the current boards to the re-attached player.
         self._sync_state(slot)
-        # Prompt the shooter immediately, but mark that we've done so
-        self._prompt_current_player()
-        self._just_rebound = True
+        # Don't prompt here; we'll get re-prompted in the next run() iteration
 
     # ------------------------------------------------------------
     # helper: push fresh boards to a just-reconnected player
@@ -446,7 +440,7 @@ class GameSession(threading.Thread):
         return ok
 
     def _conclude(self, winner: int, *, reason: str) -> None:
-        print(f"[DEBUG] _conclude: winner={winner}, reason={reason}")
+        logging.debug(f"_conclude: winner={winner}, reason={reason}")
         loser = 2 if winner == 1 else 1
         win_w = self.p1_file_w if winner == 1 else self.p2_file_w
         lose_w = self.p2_file_w if winner == 1 else self.p1_file_w
@@ -460,7 +454,7 @@ class GameSession(threading.Thread):
         self.win_shots = shots  # type: ignore[attr-defined]
         # Spectators no longer receive free-text finale; emit line to server logs only.
         result_line = f"[GAME] Match finished – P{winner} wins by {reason} in {shots} shots."
-        print(result_line)
+        logging.info(result_line)
 
         # Emit end-of-game event (EventRouter will broadcast exactly one end-frame per client)
         self._emit(Event(Category.TURN, "end", {"winner": winner, "reason": reason, "shots": shots}))
@@ -491,16 +485,15 @@ class GameSession(threading.Thread):
         Return True if the match concluded and run should exit, False otherwise.
         """
         for idx in dropped_slots:
-            print(f"[INFO] Player {idx} disconnected – awaiting reconnect")
+            logging.info(f"Player {idx} disconnected – awaiting reconnect")
         failed: list[int] = []
         for idx in dropped_slots:
             if self.recon.wait(idx):
-                print(f"[INFO] Player {idx} reconnected – resuming match")
+                logging.info(f"Player {idx} reconnected – resuming match")
                 new_sock = self.recon.take_new_socket(idx)
                 self._rebind_slot(idx, new_sock)
                 continue
-            if self.spec.promote(idx, self):
-                continue
+            # No recon and no in-session promotion → mark as failure
             failed.append(idx)
         if failed:
             if set(failed) == {1, 2}:
@@ -536,6 +529,7 @@ class GameSession(threading.Thread):
 
         # 3) Unregister reconnect tokens
         from .server import PID_REGISTRY
+
         PID_REGISTRY.pop(self.token_p1, None)
         PID_REGISTRY.pop(self.token_p2, None)
 
@@ -560,7 +554,7 @@ class GameSession(threading.Thread):
         Send the canonical 'Your turn' frame to whichever slot is stored in self.current.
         """
         w = self.p1_file_w if self.current == 1 else self.p2_file_w
-        self._notify(w, "INFO Your turn – FIRE <coord> or QUIT")
+        self._notify(w, "INFO YOUR TURN – FIRE <coord> or QUIT")
 
 
 # End of GameSession module
