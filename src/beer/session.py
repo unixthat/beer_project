@@ -40,6 +40,7 @@ import threading
 import time
 import select
 from typing import TextIO, Any, Callable, List
+import logging
 
 from .battleship import Board, SHIPS, parse_coordinate, SHIP_LETTERS
 from .common import PacketType
@@ -247,10 +248,10 @@ class GameSession(threading.Thread):
                     sock = r.buffer.raw._sock
                     # Peek for EOF only (do not consume any data)
                     if self._is_eof(sock):
-                        print(f"[INFO] EOF on player {idx}'s socket detected")
+                        logging.info(f"EOF on player {idx}'s socket detected")
                         dropped_slots.append(idx)
                 if dropped_slots:
-                    print(f"[INFO] Disconnected slots detected: {dropped_slots}")
+                    logging.info(f"Disconnected slots detected: {dropped_slots}")
                     if self._handle_disconnects(dropped_slots):
                         return
                     continue
@@ -267,9 +268,9 @@ class GameSession(threading.Thread):
                 self._emit(Event(Category.TURN, "prompt", {"player": current_player}))
 
                 coord = recv_turn(self, attacker_r, attacker_w, defender_r, defender_w)
-                print(f"[DEBUG SERVER] recv_turn returned: {coord!r}")
+                logging.debug(f"recv_turn returned: {coord!r}")
                 if coord == "ATTACKER_LEFT":
-                    print(f"[INFO] Attacker {current_player} left mid-turn")
+                    logging.info(f"Attacker {current_player} left mid-turn")
                     # attacker dropped mid-turn → try reconnect
                     if self.recon.wait(current_player):
                         new_sock = self.recon.take_new_socket(current_player)
@@ -280,20 +281,20 @@ class GameSession(threading.Thread):
                     return
                 elif coord is None:
                     # genuine timeout/no-EOF case → concession
-                    print(f"[INFO] Player {current_player} timed out – ending match")
+                    logging.info(f"Player {current_player} timed out – ending match")
                     self.drop_and_deregister(current_player, reason="timeout")
                     return
 
                 if coord == "QUIT":
                     # Player conceded mid-turn → end session
-                    print(f"[INFO] Player {current_player} conceded – ending match")
+                    logging.info(f"Player {current_player} conceded – ending match")
                     self.drop_and_deregister(current_player, reason="concession")
                     return
 
                 row, col = coord  # tuple[int, int]
                 # Prevent duplicate shots: check if this player already fired here
                 key = (row, col)
-                print(f"[DBG] Broadcasting shot for P{self.current}: {(row, col)}")
+                logging.debug(f"Broadcasting shot for P{self.current}: {(row, col)}")
 
                 if key in self._fired[current_player]:
                     # Prevent duplicate shots: prompt error
@@ -439,7 +440,7 @@ class GameSession(threading.Thread):
         return ok
 
     def _conclude(self, winner: int, *, reason: str) -> None:
-        print(f"[DEBUG] _conclude: winner={winner}, reason={reason}")
+        logging.debug(f"_conclude: winner={winner}, reason={reason}")
         loser = 2 if winner == 1 else 1
         win_w = self.p1_file_w if winner == 1 else self.p2_file_w
         lose_w = self.p2_file_w if winner == 1 else self.p1_file_w
@@ -453,7 +454,7 @@ class GameSession(threading.Thread):
         self.win_shots = shots  # type: ignore[attr-defined]
         # Spectators no longer receive free-text finale; emit line to server logs only.
         result_line = f"[GAME] Match finished – P{winner} wins by {reason} in {shots} shots."
-        print(result_line)
+        logging.info(result_line)
 
         # Emit end-of-game event (EventRouter will broadcast exactly one end-frame per client)
         self._emit(Event(Category.TURN, "end", {"winner": winner, "reason": reason, "shots": shots}))
@@ -484,11 +485,11 @@ class GameSession(threading.Thread):
         Return True if the match concluded and run should exit, False otherwise.
         """
         for idx in dropped_slots:
-            print(f"[INFO] Player {idx} disconnected – awaiting reconnect")
+            logging.info(f"Player {idx} disconnected – awaiting reconnect")
         failed: list[int] = []
         for idx in dropped_slots:
             if self.recon.wait(idx):
-                print(f"[INFO] Player {idx} reconnected – resuming match")
+                logging.info(f"Player {idx} reconnected – resuming match")
                 new_sock = self.recon.take_new_socket(idx)
                 self._rebind_slot(idx, new_sock)
                 continue

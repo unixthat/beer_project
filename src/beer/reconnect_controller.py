@@ -4,6 +4,7 @@ import threading
 import socket
 from typing import Callable, Dict
 from .io_utils import send as io_send
+import logging
 
 
 class ReconnectController:
@@ -50,7 +51,7 @@ class ReconnectController:
         """
         other = 2 if slot == 1 else 1
         # Log server-side disconnect event
-        print(f"[INFO] Player {slot} disconnected – waiting up to {self.timeout}s for reconnect")
+        logging.info(f"Player {slot} disconnected – waiting up to {self.timeout}s for reconnect")
         self.notify_fn(slot, f"INFO You have disconnected – reconnect within {self.timeout}s using your token")
         # Notify the surviving player that we're holding the slot
         self.notify_fn(other, f"INFO Opponent disconnected – holding slot for {self.timeout}s")
@@ -58,7 +59,7 @@ class ReconnectController:
         reattached = evt.wait(timeout=self.timeout)
         if reattached:
             # Log server-side reconnection
-            print(f"[INFO] Player {slot} reconnected successfully")
+            logging.info(f"Player {slot} reconnected successfully")
             # Acknowledge rejoin to both sides
             self.notify_fn(other, "INFO Opponent has reconnected – resuming match")
             self.notify_fn(slot, "INFO You have reconnected – resuming match")

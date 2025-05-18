@@ -4,6 +4,10 @@ import threading
 from beer.session import GameSession
 from beer.server import PID_REGISTRY
 from beer.common import recv_pkt
+import logging
+
+# Suppress INFO & DEBUG logs from server threads during tests
+logging.basicConfig(level=logging.WARNING)
 
 
 class TestClient:

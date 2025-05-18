@@ -123,15 +123,22 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
     if args.debug:
         os.environ["BEER_DEBUG"] = "1"
 
-    # Determine effective verbosity: silent → -1, otherwise 0/1/2 (count of -v)
-    eff_verbose = -1 if args.silent else args.verbose
-
+    # Determine log level from CLI flags:
+    if args.silent:
+        level = logging.ERROR
+    elif args.debug or _cfg.DEBUG:
+        level = logging.DEBUG
+    elif args.verbose >= 1:
+        level = logging.INFO
+    else:
+        level = logging.WARNING
     logging.basicConfig(
-        level=logging.DEBUG if _cfg.DEBUG else logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+        level=level,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
     _parse_cli_flags(sys.argv)
 
-    print(f"[INFO] BEER server listening on {HOST}:{PORT}")
+    logging.info(f"BEER server listening on {HOST}:{PORT}")
     # lobby holds tuples of (conn, reconnect_token)
     lobby: list[tuple[socket.socket, Optional[str]]] = []
     current_session: GameSession | None = None
@@ -169,9 +176,9 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
                 (c2, token2) = lobby.pop(0)
                 # Prevent duplicate tokens in a new match
                 if token1 and token2 and token1 == token2:
-                    print(f"[WARN] Duplicate token {token1} in lobby; resetting second slot to fresh token")
+                    logging.warning(f"Duplicate token {token1} in lobby; resetting second slot to fresh token")
                     token2 = None
-                print("[INFO] Launching new game session")
+                logging.info("Launching new game session")
                 ships_list = ONE_SHIP_LIST if USE_ONE_SHIP else SHIPS
                 session_ready.clear()
                 # Generate or reuse PID-tokens
