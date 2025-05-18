@@ -284,14 +284,14 @@ def main() -> None:  # pragma: no cover
     # keep playing until user hits Ctrl-C
     while True:
         try:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.connect((args.host, args.port))
-        wfile = s.makefile("w")
-        state = _BotState(logic, wfile)
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.connect((args.host, args.port))
+                wfile = s.makefile("w")
+                state = _BotState(logic, wfile)
 
-        stop_evt = threading.Event()
-        receiver = BotReceiver(s, state, stop_evt, verbose)
-        receiver.start()
+                stop_evt = threading.Event()
+                receiver = BotReceiver(s, state, stop_evt, verbose)
+                receiver.start()
 
                 # wait for game to finish (stop_evt set in _on_end)
             while not stop_evt.is_set():
