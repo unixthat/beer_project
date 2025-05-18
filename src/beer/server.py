@@ -187,10 +187,12 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
                     # Re-queue any spectators as fresh lobby entries (no PID token)
                     with sess.spec._lock:
                         spectators = list(sess.spec._sockets)
+                        tokens = [sess.spec._tokens.get(s) for s in spectators]
                         sess.spec._sockets.clear()
                         sess.spec._writers.clear()
-                    for spec_sock in spectators:
-                        lobby.append((spec_sock, None))
+                        sess.spec._tokens.clear()
+                    for spec_sock, tok in zip(spectators, tokens):
+                        lobby.append((spec_sock, tok))
                     if spectators:
                         print(f"[INFO] Re-queued {len(spectators)} spectator(s) for new match")
                     # Determine winner and loser sockets/tokens
@@ -249,7 +251,8 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
                         token_str = candidate
                 # After reconnect handshake, if a game is running, attach as spectator
                 if current_session and current_session.is_alive() and session_ready.is_set():
-                    current_session.spec.add(conn)
+                    # client sent TOKEN <pid> earlier, stored in token_str
+                    current_session.spec.add(conn, token_str)
                     print("[INFO] Spectator attached")
                     continue
                 # Fresh join → add to lobby with client PID token (if any)

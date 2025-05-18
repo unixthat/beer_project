@@ -2,6 +2,7 @@ import threading
 import socket
 from typing import TextIO, Any, List, Callable
 from .io_utils import grid_rows
+from .battleship import Board
 import contextlib
 
 
@@ -13,14 +14,16 @@ class SpectatorHub:
         self._sockets: List[socket.socket] = []
         self._writers: List[TextIO] = []
         self._notify = notify_fn
+        self._tokens: dict[socket.socket, str | None] = {}
 
-    def add(self, sock: socket.socket) -> None:
+    def add(self, sock: socket.socket, token: str | None) -> None:
         """Register a new spectator and notify them."""
         with self._lock:
             wfile = sock.makefile("w")
             self._sockets.append(sock)
             self._writers.append(wfile)
             self._notify(wfile, "INFO YOU ARE NOW SPECTATING", None)
+            self._tokens[sock] = token
 
     def broadcast(self, msg: str) -> None:
         """Broadcast a text message to all spectators."""
@@ -106,6 +109,28 @@ class SpectatorHub:
 
         # Advise the promoted client
         self._notify(new_wfile, "INFO YOU ARE NOW PLAYING – you've replaced the disconnected opponent", None)
+        # Extract & register this client's PID-token for the new slot
+        token = self._tokens.pop(new_sock, None)
+        from .server import PID_REGISTRY
+        # Clean up old slot token and install the new one
+        if slot == 1:
+            old = session.recon.token1
+            PID_REGISTRY.pop(old, None)
+            session.recon.token1 = token
+            session.token_p1 = token
+        else:
+            old = session.recon.token2
+            PID_REGISTRY.pop(old, None)
+            session.recon.token2 = token
+            session.token_p2 = token
+        PID_REGISTRY[token] = session.recon
+        # Now reset game session for a fresh match
+        session.board_p1 = Board()
+        session.board_p2 = Board()
+        session._shots = {1: 0, 2: 0}
+        session._fired = {1: set(), 2: set()}
+        session._half_turn_counter = 0
+        session._line_buffer.clear()
         # Start a fresh match handshake
         session._begin_match()
         return True

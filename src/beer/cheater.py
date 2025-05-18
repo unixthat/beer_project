@@ -22,18 +22,23 @@ class Cheater:
 
     def feed_grid(self, rows: list[str]) -> None:
         """
-        Call once on the very first grid-packet where _is_reveal_grid(rows)==True.
-        Extract every ship cell (A1…J10) into a queue.
+        Seed your target queue whenever you receive a reveal-grid.
+        The first time you see ships, or whenever you've emptied your old queue,
+        this will clear and refill _targets for the new game.
         """
-        if self._seeded or not _is_reveal_grid(rows):
+        if not _is_reveal_grid(rows):
             return
-        for r, line in enumerate(rows):
-            for c, cell in enumerate(line.split()):
-                # any non-'.' in a reveal-grid is a ship letter
-                if cell != ".":
-                    coord = f"{chr(ord('A') + r)}{c+1}"
-                    self._targets.append(coord)
-        self._seeded = True
+
+        # Only (re)seed when we haven't seeded yet, or have exhausted prior targets
+        if not self._seeded or not self._targets:
+            # Clear old targets (important between games)
+            self._targets.clear()
+            for r, line in enumerate(rows):
+                for c, cell in enumerate(line.split()):
+                    if cell != ".":
+                        coord = f"{chr(ord('A') + r)}{c+1}"
+                        self._targets.append(coord)
+            self._seeded = True
 
     def notify_turn(self) -> None:
         """

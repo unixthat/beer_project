@@ -271,20 +271,7 @@ class GameSession(threading.Thread):
 
                 coord = recv_turn(self, attacker_r, attacker_w, defender_r, defender_w)
                 print(f"[DEBUG SERVER] recv_turn returned: {coord!r}")
-                if coord == "DEFENDER_LEFT":
-                    print(f"[INFO] Defender {defender_idx} left mid-turn")
-                    # defender dropped mid-turn → try reconnect first
-                    if self.recon.wait(defender_idx):
-                        new_sock = self.recon.take_new_socket(defender_idx)
-                        self._rebind_slot(defender_idx, new_sock)
-                        continue
-                    while not self.spec.promote(defender_idx, self):
-                        if self.spec.empty():
-                            winner = 2 if current_player == 1 else 1
-                            self._conclude(winner, reason="timeout")
-                            return
-                    continue
-                elif coord == "ATTACKER_LEFT":
+                if coord == "ATTACKER_LEFT":
                     print(f"[INFO] Attacker {current_player} left mid-turn")
                     # attacker dropped mid-turn → try reconnect
                     if self.recon.wait(current_player):
@@ -301,8 +288,20 @@ class GameSession(threading.Thread):
                     return
 
                 if coord == "QUIT":
-                    # Player conceded mid-turn → end this session.
-                    print(f"[INFO] Player {current_player} conceded – ending match")
+                    # Player conceded mid-turn → attempt spectator promotion
+                    print(f"[INFO] Player {current_player} conceded – attempting spectator promotion")
+                    if self.spec.promote(current_player, self):
+                        # promoted a spectator into this slot; start new game
+                        continue
+                    # no spectators: end the session
+                    print(f"[INFO] No spectators available – ending match")
+                    # Inform the winner that their opponent quit by concession
+                    winner = 2 if current_player == 1 else 1
+                    win_w = self.p1_file_w if winner == 1 else self.p2_file_w
+                    self._notify(win_w, "INFO Opponent quit – you win by concession")
+                    # Confirm to the quitter that they conceded
+                    lose_w = self.p1_file_w if current_player == 1 else self.p2_file_w
+                    self._notify(lose_w, "INFO You have conceded the match")
                     self.drop_and_deregister(current_player, reason="concession")
                     return
 

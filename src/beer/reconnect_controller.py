@@ -51,6 +51,7 @@ class ReconnectController:
         other = 2 if slot == 1 else 1
         # Log server-side disconnect event
         print(f"[INFO] Player {slot} disconnected – waiting up to {self.timeout}s for reconnect")
+        self.notify_fn(slot, f"INFO You have disconnected – reconnect within {self.timeout}s using your token")
         # Notify the surviving player that we're holding the slot
         self.notify_fn(other, f"INFO Opponent disconnected – holding slot for {self.timeout}s")
         evt = self.events[slot]

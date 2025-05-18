@@ -101,35 +101,22 @@ def recv_turn(
 ) -> Any:
     import select as _select, time as _time
 
-    print("[DBG recv_turn] start")
-    # Only show the select debug info once per recv_turn invocation
-    first_select = True
+    # Debug prints removed; internal logic unchanged
+    first_select = False
 
     start = _time.time()
     while True:
         att_sock = r.buffer.raw._sock  # type: ignore[attr-defined]
         def_sock = defender_r.buffer.raw._sock  # type: ignore[attr-defined]
         remaining = TURN_TIMEOUT - (_time.time() - start)
-        if first_select:
-            print(f"[DBG recv_turn] remaining={remaining}")
         if remaining <= 0:
-            print("[DBG recv_turn] timeout")
             return None
         readable, _, _ = _select.select([att_sock, def_sock], [], [], remaining)
-        if first_select:
-            print(f"[DBG recv_turn] readable={readable}")
         if att_sock in readable and def_sock in readable:
             readable.sort(key=lambda s: 0 if s is att_sock else 1)
-            print("[DBG recv_turn] sorted for attacker priority")
         if not readable:
-            print("[DBG recv_turn] no readable sockets")
             return None
         for sock in readable:
-            role = 'attacker' if sock is att_sock else 'defender'
-            if first_select:
-                print(f"[DBG recv_turn] handling socket for {role}")
-                # Turn off first_select so we don't spam on subsequent loops
-                first_select = False
             file = r if sock is att_sock else defender_r
             writer = w if file is r else defender_w
             slot = 1 if file is session.p1_file_r else 2
@@ -150,34 +137,26 @@ def recv_turn(
                 continue
 
             line = raw_line.strip()
-            print(f"[DBG recv_turn] command line={line!r}")
-            if session.spec.is_spectator(file):
-                print("[DBG recv_turn] spectator command")
-                send(writer, session.io_seq, msg="ERR Spectators cannot issue commands")
-                session.io_seq += 1
-                continue
             try:
                 cmd = parse_command(line)
-                print(f"[DBG recv_turn] parsed cmd={cmd}")
             except CommandParseError as e:
-                print(f"[DBG recv_turn] parse error={e}")
                 send(writer, session.io_seq, msg=f"ERR {e}")
                 session.io_seq += 1
                 continue
+            if session.spec.is_spectator(file):
+                send(writer, session.io_seq, msg="ERR Spectators cannot issue commands")
+                session.io_seq += 1
+                continue
             if sock is def_sock:
-                print("[DBG recv_turn] defender out-of-turn")
                 if isinstance(cmd, ChatCommand):
-                    print(f"[DBG recv_turn] defender chat {cmd.text}")
                     session.io_seq = chat_broadcast([
                         session.p1_file_w, session.p2_file_w
                     ], session.io_seq, 2, cmd.text, {"name": "P2", "msg": cmd.text})
                     continue
                 if isinstance(cmd, QuitCommand):
-                    print("[DBG recv_turn] defender quit concession")
                     session._conclude(1, reason="concession")
                     return None
                 if isinstance(cmd, FireCommand):
-                    print("[DBG recv_turn] defender attempted FIRE out-of-turn")
                     send(defender_w, session.io_seq, msg="ERR Not your turn – wait for your turn prompt")
                     session.io_seq += 1
                     continue
@@ -185,18 +164,15 @@ def recv_turn(
                 session.io_seq += 1
                 continue
             if isinstance(cmd, ChatCommand):
-                print(f"[DBG recv_turn] attacker chat {cmd.text}")
                 session.io_seq = chat_broadcast([
                     session.p1_file_w, session.p2_file_w
                 ], session.io_seq, 1, cmd.text, {"name": "P1", "msg": cmd.text})
                 continue
             if isinstance(cmd, QuitCommand):
-                print("[DBG recv_turn] attacker quit")
                 return "QUIT"
             if isinstance(cmd, FireCommand):
-                print(f"[DBG recv_turn] attacker FIRE {(cmd.row, cmd.col)}")
                 return (cmd.row, cmd.col)
-            print("[DBG recv_turn] unknown command fallback")
+            # unknown command fallback
             send(w, session.io_seq, msg="ERR Unknown error processing command")
             session.io_seq += 1
             continue
