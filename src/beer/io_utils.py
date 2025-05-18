@@ -167,6 +167,7 @@ def recv_turn(
                 continue
             if sock is def_sock:
                 if isinstance(cmd, ChatCommand):
+                    # send to both players
                     session.io_seq = chat_broadcast(
                         [session.p1_file_w, session.p2_file_w],
                         session.io_seq,
@@ -174,6 +175,8 @@ def recv_turn(
                         cmd.text,
                         {"name": "P2", "msg": cmd.text},
                     )
+                    # also send to any waiting spectators
+                    session._broadcast(None, {"type": "chat", "name": "P2", "msg": cmd.text})
                     continue
                 if isinstance(cmd, QuitCommand):
                     session._conclude(1, reason="concession")
@@ -186,9 +189,16 @@ def recv_turn(
                 session.io_seq += 1
                 continue
             if isinstance(cmd, ChatCommand):
+                # attacker→both players
                 session.io_seq = chat_broadcast(
-                    [session.p1_file_w, session.p2_file_w], session.io_seq, 1, cmd.text, {"name": "P1", "msg": cmd.text}
+                    [session.p1_file_w, session.p2_file_w],
+                    session.io_seq,
+                    1,
+                    cmd.text,
+                    {"name": "P1", "msg": cmd.text},
                 )
+                # attacker chat → also to spectators
+                session._broadcast(None, {"type": "chat", "name": "P1", "msg": cmd.text})
                 continue
             if isinstance(cmd, QuitCommand):
                 return "QUIT"

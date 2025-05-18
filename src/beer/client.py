@@ -422,8 +422,10 @@ def _client(s, args, cheat_mode: bool = False):
             if user_input.upper() == "QUIT":
                 print("[INFO] Exiting client per user request.")
                 break
-            if user_input.startswith("/chat "):
-                user_input = f"CHAT {user_input[6:]}"
+            # map slash-chat (any case) to CHAT for the protocol
+            parts = user_input.strip().split(" ", 1)
+            if parts[0].lower() == "/chat" and len(parts) > 1:
+                user_input = f"CHAT {parts[1]}"
             wfile.write(user_input + "\n")
             wfile.flush()
     except KeyboardInterrupt:
