@@ -8,6 +8,7 @@ from beer.commands import (
     CommandParseError,
 )
 
+
 def test_chat_basic():
     cmd = parse_command("CHAT Hello world")
     assert isinstance(cmd, ChatCommand)
