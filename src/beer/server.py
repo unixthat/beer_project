@@ -176,7 +176,7 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
                 (c2, token2) = lobby.pop(0)
                 # Prevent duplicate tokens in a new match
                 if token1 and token2 and token1 == token2:
-                    logging.warning(f"Duplicate token {token1} in lobby; resetting second slot to fresh token")
+                    logging.warning(f"Duplicate token {token1} in lobby; resetting second slot to fresh token") 
                     token2 = None
                 logging.info("Launching new game session")
                 ships_list = ONE_SHIP_LIST if USE_ONE_SHIP else SHIPS

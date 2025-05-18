@@ -1,12 +1,16 @@
 from collections import deque
+from .battleship import SHIP_LETTERS
 
 
-# Local helper to detect reveal-grid rows without importing client (break circular dependency)
+# Ship letters defined in battleship.SHIP_LETTERS
+_SHIP_CHARS = set(SHIP_LETTERS.values())
+
+# Only treat a grid as a "reveal" if it actually shows ships
 def _is_reveal_grid(rows: list[str]) -> bool:
-    """Return True if rows contain any non-dot cell (i.e. a ship letter)."""
+    """Return True if rows contain any ship letter."""
     for row in rows:
         for cell in row.split():
-            if cell != ".":
+            if cell in _SHIP_CHARS:
                 return True
     return False
 
@@ -38,7 +42,7 @@ class Cheater:
             self._targets.clear()
             for r, line in enumerate(rows):
                 for c, cell in enumerate(line.split()):
-                    if cell != ".":
+                    if cell in _SHIP_CHARS:
                         coord = f"{chr(ord('A') + r)}{c+1}"
                         self._targets.append(coord)
             self._seeded = True

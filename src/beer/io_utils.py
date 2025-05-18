@@ -19,15 +19,42 @@ import socket
 def send(
     w: TextIO, seq: int, ptype: PacketType = PacketType.GAME, *, msg: str | None = None, obj: Any | None = None
 ) -> bool:
+    # Debug print of send parameters
     print(f"[DBG send] seq={seq} msg={msg} obj={obj}")
     payload = obj if obj is not None else {"msg": msg}
+    # Attempt to detect EOF on underlying socket, if available
+    sock = None
+    try:
+        # type: ignore[attr-defined]
+        sock = w.buffer.raw._sock
+    except Exception:
+        sock = None
+    if sock:
+        # non-blocking peek to detect closed peer
+        try:
+            data = sock.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT)
+            if len(data) == 0:
+                # peer closed connection
+                return False
+        except BlockingIOError:
+            # no data available, assume connection is alive
+            pass
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+            # peer reset/closed
+            return False
+        except OSError:
+            # e.g. socket not connected; skip EOF check
+            pass
     try:
         send_pkt(w.buffer, ptype, seq, payload)  # type: ignore[arg-type]
         w.buffer.flush()
         print(f"[DBG send] success seq={seq}")
         return True
+    except (BrokenPipeError, ConnectionResetError):
+        # peer closed or reset during send
+        return False
     except Exception as e:
-        print(f"[DBG send] error seq={seq} error={e}")
+        print(f"[ERROR] send failed: {e}")
         return False
 
 

@@ -269,7 +269,7 @@ def _recv_loop(
                     ):
                         print(f"\r{msg}")
                         # Reset prompt when the shooter should act again
-                        if msg.startswith("INFO Your turn") or msg.startswith("INFO Opponent has reconnected"):
+                        if msg.startswith("INFO YOUR TURN") or msg.startswith("INFO Opponent has reconnected"):
                             _prompt_shown = False
                             if cheat_mode and cheater:
                                 cheater.notify_turn()
