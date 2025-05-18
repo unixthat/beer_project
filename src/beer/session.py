@@ -295,11 +295,8 @@ class GameSession(threading.Thread):
                     return
 
                 if coord == "QUIT":
-                    # Player conceded mid-turn → try to promote a spectator first
-                    if self.spec.promote(current_player, self):
-                        # Spectator took the slot, resume same turn
-                        continue
-                    # No spectators available → final concession
+                    # Player conceded mid-turn → end this session.
+                    # Spectator promotion into a fresh match is handled by the lobby.
                     self.drop_and_deregister(current_player, reason="concession")
                     return
 

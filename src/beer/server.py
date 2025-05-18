@@ -184,6 +184,15 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
                     winner = sess.winner or 0
                     reason = sess.win_reason or ""
                     print(f"[INFO] Match completed – P{winner} won by {reason}.")
+                    # Re-queue any spectators as fresh lobby entries (no PID token)
+                    with sess.spec._lock:
+                        spectators = list(sess.spec._sockets)
+                        sess.spec._sockets.clear()
+                        sess.spec._writers.clear()
+                    for spec_sock in spectators:
+                        lobby.append((spec_sock, None))
+                    if spectators:
+                        print(f"[INFO] Re-queued {len(spectators)} spectator(s) for new match")
                     # Determine winner and loser sockets/tokens
                     if winner == 1:
                         w_sock, w_tok = sess.p1_sock, sess.token_p1
