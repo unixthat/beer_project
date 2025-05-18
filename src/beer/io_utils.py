@@ -13,30 +13,41 @@ from .config import TURN_TIMEOUT
 from .common import PacketType, send_pkt
 from .battleship import Board
 from .commands import parse_command, ChatCommand, FireCommand, QuitCommand, CommandParseError
+import socket
 
 
 def send(
-    w: TextIO, seq: int, ptype: PacketType = PacketType.GAME, *, msg: str | None = None, obj: Any | None = None
+    w: TextIO,
+    seq: int,
+    ptype: PacketType = PacketType.GAME,
+    *,
+    msg: str | None = None,
+    obj: Any | None = None
 ) -> bool:
+    print(f"[DBG send] seq={seq} msg={msg} obj={obj}")
     payload = obj if obj is not None else {"msg": msg}
     try:
         send_pkt(w.buffer, ptype, seq, payload)  # type: ignore[arg-type]
         w.buffer.flush()
+        print(f"[DBG send] success seq={seq}")
         return True
-    except Exception:
+    except Exception as e:
+        print(f"[DBG send] error seq={seq} error={e}")
         return False
 
 
 def grid_rows(board: Board, *, reveal: bool = False) -> List[str]:
+    print(f"[DBG grid_rows] reveal={reveal}")
     rows: list[str] = []
     for r in range(board.size):
         cell_row = [board.hidden_grid[r][c] if reveal else board.display_grid[r][c] for c in range(board.size)]
         rows.append(" ".join(cell_row))
+    print(f"[DBG grid_rows] rows_count={len(rows)}")
     return rows
 
 
 def send_grid(w: TextIO, seq: int, board: Board, *, reveal: bool = False) -> bool:
-    # Always send grids as GAME packets
+    print(f"[DBG send_grid] seq={seq} reveal={reveal}")
     return send(w, seq, PacketType.GAME, obj={"type": "grid", "rows": grid_rows(board, reveal=reveal)})
 
 
@@ -44,39 +55,32 @@ def safe_readline(
     reader: TextIO,
     on_disconnect: Callable[[], bool],
 ) -> str:
-    """
-    Read one line; if EOF or socket error, invoke on_disconnect once.
-    Retries exactly once if on_disconnect returns True.
-    """
     attempts = 0
     while True:
         try:
             line = reader.readline()
-        except (OSError, ConnectionResetError):
+        except (OSError, ConnectionResetError) as e:
+            print(f"[DBG safe_readline] error {e}")
             line = ""
         if line:
+            print(f"[DBG safe_readline] got line {line!r}")
             return line
-        # If first failure and reconnect succeeds, retry once
         if attempts == 0 and on_disconnect():
+            print(f"[DBG safe_readline] reconnect attempt")
             attempts += 1
             continue
-        # No data: genuine disconnect or second failure
+        print("[DBG safe_readline] returning empty line")
         return ""
 
 
-# Helper to broadcast chat messages to multiple clients
 def chat_broadcast(writers: list[TextIO], seq: int, idx: int, chat_txt: str, payload: Any) -> int:
-    """
-    Broadcast a CHAT packet to each writer, incrementing seq.
-    Returns updated seq after sending to all.
-    """
+    print(f"[DBG chat_broadcast] idx={idx} chat_txt={chat_txt}")
     for w in writers:
         send(w, seq, PacketType.CHAT, msg=f"[CHAT] P{idx}: {chat_txt}", obj=payload)
         seq += 1
     return seq
 
 
-# Helper to receive a turn: chat, FIRE, or QUIT with out-of-turn handling
 def recv_turn(
     session,
     r: TextIO,
@@ -84,114 +88,102 @@ def recv_turn(
     defender_r: TextIO,
     defender_w: TextIO,
 ) -> Any:
-    """
-    Wrapper for parsing client commands via commands.parse_command.
-    Returns (row,col) for FIRE, "QUIT", None on timeout/disconnect, or "DEFENDER_LEFT".
-    """
     import select as _select, time as _time
 
     start = _time.time()
+    print("[DBG recv_turn] start")
     while True:
-        # Refresh socket FDs in case of reconnect
         att_sock = r.buffer.raw._sock  # type: ignore[attr-defined]
         def_sock = defender_r.buffer.raw._sock  # type: ignore[attr-defined]
         remaining = TURN_TIMEOUT - (_time.time() - start)
+        print(f"[DBG recv_turn] remaining={remaining}")
         if remaining <= 0:
+            print("[DBG recv_turn] timeout")
             return None
-        # always handle the shooter first if both sockets are ready
         readable, _, _ = _select.select([att_sock, def_sock], [], [], remaining)
+        print(f"[DBG recv_turn] readable={readable}")
         if att_sock in readable and def_sock in readable:
             readable.sort(key=lambda s: 0 if s is att_sock else 1)
+            print("[DBG recv_turn] sorted for attacker priority")
         if not readable:
+            print("[DBG recv_turn] no readable sockets")
             return None
         for sock in readable:
+            role = 'attacker' if sock is att_sock else 'defender'
+            print(f"[DBG recv_turn] handling socket for {role}")
             file = r if sock is att_sock else defender_r
             writer = w if file is r else defender_w
             slot = 1 if file is session.p1_file_r else 2
-            raw_line = safe_readline(file, lambda: session.recon.wait(slot))
-            # If no data, attempt non-blocking rebind and retry
-            if not raw_line and session._rebind_if_needed(slot):
-                # Refresh I/O handles for this slot
-                file, writer = session._file_pair(slot)
-                raw_line = safe_readline(file, lambda: session.recon.wait(slot))
-            # If still no line, genuine timeout/disconnect
-            if not raw_line:
-                # defender vanished mid-turn → signal outer loop
+
+            # ---- cursor-fix-reconnect ▶ non-destructive EOF probe ----
+            if session._is_eof(sock):
+                # defender dropped mid-turn?
                 if sock is def_sock:
                     return "DEFENDER_LEFT"
-                # attacker timed out / disconnected
+                # attacker timeout/disconnect
                 return None
+
+            # Now there is actual data ready: read it
+            try:
+                raw_line = file.readline()
+            except (OSError, ConnectionResetError):
+                raw_line = ""
+            if not raw_line:
+                return None
+
             line = raw_line.strip()
-            # Spectator command guard (G-8)
+            print(f"[DBG recv_turn] command line={line!r}")
             if session.spec.is_spectator(file):
-                # Spectators cannot issue commands
+                print("[DBG recv_turn] spectator command")
                 send(writer, session.io_seq, msg="ERR Spectators cannot issue commands")
                 session.io_seq += 1
                 continue
-
-            # Parse via commands.py
             try:
                 cmd = parse_command(line)
+                print(f"[DBG recv_turn] parsed cmd={cmd}")
             except CommandParseError as e:
-                # Notify appropriate writer
-                session.io_seq += 0  # ensure io_seq exists
+                print(f"[DBG recv_turn] parse error={e}")
                 send(writer, session.io_seq, msg=f"ERR {e}")
                 session.io_seq += 1
                 continue
-
-            # Defender sending out-of-turn
             if sock is def_sock:
+                print("[DBG recv_turn] defender out-of-turn")
                 if isinstance(cmd, ChatCommand):
-                    chat_txt = cmd.text
-                    idx = 2
-                    payload = {"name": f"P{idx}", "msg": chat_txt}
-                    session.io_seq = chat_broadcast(
-                        [session.p1_file_w, session.p2_file_w],
-                        session.io_seq,
-                        idx,
-                        chat_txt,
-                        payload,
-                    )
-                    session._emit(Event(Category.CHAT, "line", {"player": idx, "msg": chat_txt}))
+                    print(f"[DBG recv_turn] defender chat {cmd.text}")
+                    session.io_seq = chat_broadcast([
+                        session.p1_file_w, session.p2_file_w
+                    ], session.io_seq, 2, cmd.text, {"name": "P2", "msg": cmd.text})
                     continue
                 if isinstance(cmd, QuitCommand):
-                    winner = 1
-                    session._conclude(winner, reason="concession")
+                    print("[DBG recv_turn] defender quit concession")
+                    session._conclude(1, reason="concession")
                     return None
                 if isinstance(cmd, FireCommand):
+                    print("[DBG recv_turn] defender attempted FIRE out-of-turn")
                     send(defender_w, session.io_seq, msg="ERR Not your turn – wait for your turn prompt")
                     session.io_seq += 1
                     continue
-                # fallback
                 send(defender_w, session.io_seq, msg="ERR Invalid command. Use: FIRE <A-J1-10> or QUIT")
                 session.io_seq += 1
                 continue
-
-            # Attacker's turn
             if isinstance(cmd, ChatCommand):
-                chat_txt = cmd.text
-                idx = 1
-                payload = {"name": f"P{idx}", "msg": chat_txt}
-                session.io_seq = chat_broadcast(
-                    [session.p1_file_w, session.p2_file_w],
-                    session.io_seq,
-                    idx,
-                    chat_txt,
-                    payload,
-                )
-                session._emit(Event(Category.CHAT, "line", {"player": idx, "msg": chat_txt}))
+                print(f"[DBG recv_turn] attacker chat {cmd.text}")
+                session.io_seq = chat_broadcast([
+                    session.p1_file_w, session.p2_file_w
+                ], session.io_seq, 1, cmd.text, {"name": "P1", "msg": cmd.text})
                 continue
             if isinstance(cmd, QuitCommand):
+                print("[DBG recv_turn] attacker quit")
                 return "QUIT"
             if isinstance(cmd, FireCommand):
+                print(f"[DBG recv_turn] attacker FIRE {(cmd.row, cmd.col)}")
                 return (cmd.row, cmd.col)
-            # Should not reach here, but catch-all
+            print("[DBG recv_turn] unknown command fallback")
             send(w, session.io_seq, msg="ERR Unknown error processing command")
             session.io_seq += 1
             continue
 
 
-# Helper to refresh both players' boards with own and opponent views
 def refresh_views(
     w1: TextIO,
     w2: TextIO,
@@ -199,17 +191,14 @@ def refresh_views(
     board1: Board,
     board2: Board,
 ) -> Tuple[bool, bool, int]:
-    """
-    Send own-fleet reveal and opponent views to both players.
-    Returns (ok1, ok2, new_seq).
-    """
+    print(f"[DBG refresh_views] seq={seq}")
     ok1 = send_grid(w1, seq, board1, reveal=True)
     seq += 1
     ok2 = send_grid(w2, seq, board2, reveal=True)
     seq += 1
-    # Opponent views
     send_grid(w1, seq, board2)
     seq += 1
     send_grid(w2, seq, board1)
     seq += 1
+    print(f"[DBG refresh_views] done seq={seq}")
     return ok1, ok2, seq

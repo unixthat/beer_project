@@ -287,6 +287,8 @@ class GameSession(threading.Thread):
                 row, col = coord  # tuple[int, int]
                 # Prevent duplicate shots: check if this player already fired here
                 key = (row, col)
+                print(f"[DBG] Broadcasting shot for P{self.current}: {(row, col)}")
+
                 if key in self._fired[current_player]:
                     # Prevent duplicate shots: prompt error
                     self._notify(attacker_w, f"ERR Already fired at {format_coord(row, col)}, choose another")
@@ -385,16 +387,8 @@ class GameSession(threading.Thread):
 
         # After rebinding, push the current boards to the re-attached player.
         self._sync_state(slot)
-
-        # If the re-attaching player is the shooter, prompt them; otherwise remind whoever's turn it still is
-        if slot == self.current:
-            attacker_w = self.p1_file_w if slot == 1 else self.p2_file_w
-            self._notify(attacker_w, "INFO Your turn – FIRE <coord> or QUIT")
-        else:
-            other_slot = 2 if slot == 1 else 1
-            if self.current == other_slot:
-                attacker_w = self.p1_file_w if other_slot == 1 else self.p2_file_w
-                self._notify(attacker_w, "INFO Your turn – FIRE <coord> or QUIT")
+        # Always re-prompt the shooter
+        self._prompt_current_player()
 
     # ------------------------------------------------------------
     # helper: push fresh boards to a just-reconnected player
@@ -531,6 +525,29 @@ class GameSession(threading.Thread):
         # Determine winner
         winner = 2 if slot == 1 else 1
         self._conclude(winner, reason=reason)
+
+    # -----
+    # Reconnect helpers (installed by cursor-fix-reconnect)
+    # -----
+    def _is_eof(self, sock: socket.socket) -> bool:
+        """
+        Return True only when the peer has really closed the TCP stream.
+        Uses MSG_PEEK so no user data is consumed.
+        """
+        try:
+            data = sock.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT)
+            return len(data) == 0
+        except BlockingIOError:
+            return False
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+            return True
+
+    def _prompt_current_player(self) -> None:
+        """
+        Send the canonical 'Your turn' frame to whichever slot is stored in self.current.
+        """
+        w = self.p1_file_w if self.current == 1 else self.p2_file_w
+        self._notify(w, "INFO Your turn – FIRE <coord> or QUIT")
 
 
 # End of GameSession module
