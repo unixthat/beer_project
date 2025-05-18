@@ -260,22 +260,30 @@ class GameSession(threading.Thread):
                 coord = recv_turn(self, attacker_r, attacker_w, defender_r, defender_w)
                 print(f"[DEBUG SERVER] recv_turn returned: {coord!r}")
                 if coord == "DEFENDER_LEFT":
+                    print(f"[INFO] Defender {defender_idx} left mid-turn")
                     # defender dropped mid-turn → try reconnect first
                     if self.recon.wait(defender_idx):
-                        # Original defender rejoined: rebind socket
                         new_sock = self.recon.take_new_socket(defender_idx)
                         self._rebind_slot(defender_idx, new_sock)
-                        continue  # resume turn with reattached defender
-                    # cascade spectator promotion until one fills or none left
+                        continue
                     while not self.spec.promote(defender_idx, self):
                         if self.spec.empty():
-                            # no spectators left → opponent wins by timeout
                             winner = 2 if current_player == 1 else 1
                             self._conclude(winner, reason="timeout")
                             return
-                    continue  # resume same turn with new defender
-                if coord is None:
-                    # TURN_TIMEOUT or dropped during FIRE → immediate concession
+                    continue
+                elif coord == "ATTACKER_LEFT":
+                    print(f"[INFO] Attacker {current_player} left mid-turn")
+                    # attacker dropped mid-turn → try reconnect
+                    if self.recon.wait(current_player):
+                        new_sock = self.recon.take_new_socket(current_player)
+                        self._rebind_slot(current_player, new_sock)
+                        continue
+                    # failed to reattach → concession
+                    self.drop_and_deregister(current_player, reason="timeout")
+                    return
+                elif coord is None:
+                    # genuine timeout/no-EOF case → concession
                     self.drop_and_deregister(current_player, reason="timeout")
                     return
 

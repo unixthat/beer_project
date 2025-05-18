@@ -117,11 +117,10 @@ def recv_turn(
 
             # ---- cursor-fix-reconnect ▶ non-destructive EOF probe ----
             if session._is_eof(sock):
-                # defender dropped mid-turn?
                 if sock is def_sock:
                     return "DEFENDER_LEFT"
-                # attacker timeout/disconnect
-                return None
+                # attacker dropped mid-turn
+                return "ATTACKER_LEFT"
 
             # Now there is actual data ready: read it
             try:
@@ -129,7 +128,9 @@ def recv_turn(
             except (OSError, ConnectionResetError):
                 raw_line = ""
             if not raw_line:
-                return None
+                if sock is def_sock:
+                    return "DEFENDER_LEFT"
+                return "ATTACKER_LEFT"
 
             line = raw_line.strip()
             print(f"[DBG recv_turn] command line={line!r}")
