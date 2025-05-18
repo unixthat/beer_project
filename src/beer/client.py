@@ -189,11 +189,13 @@ def _recv_loop(sock: socket.socket, stop_evt: threading.Event, verbose: int, che
             print(f"YOU LOST – opponent won with {shots} shots")
 
     def h_opp_grid(obj: dict) -> None:
-        # This is the opponent's hidden grid reveal
+        # Reveal hidden opponent grid only in --win (cheat) mode
+        if not cheat_mode:
+            return
         rows = obj["rows"]
-        if cheat_mode:
-            cheater.feed_grid(rows)
-        # You may optionally display it for debugging:
+        # Seed the cheater logic
+        cheater.feed_grid(rows)
+        # Display the hidden grid
         if verbose >= 0:
             print("\n[Opponent Hidden Ships]")
             _print_grid(rows)
