@@ -53,6 +53,5 @@ roadmap.md
 src/beer/ppo_battleship.zip
 src.zip
 beer.zip
-.cursor/rules/000-read-roadmap.mdc
-.cursor/rules/cursor-fix-reconnect.mdc
+.cursor/
 docs/spectator_is_lobby.txt
