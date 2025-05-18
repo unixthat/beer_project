@@ -3,6 +3,7 @@ import socket
 import threading
 from beer.session import GameSession
 from beer.server import PID_REGISTRY
+from beer.common import recv_pkt
 
 
 class TestClient:
@@ -16,23 +17,19 @@ class TestClient:
         self.sock.sendall(msg.encode())
 
     def recv_until(self, token: str, timeout: float = 2.0) -> str:
-        """Read raw bytes until the uppercase token appears or timeout."""
-        token_upper = token.upper()
-        buf = b""
+        """Read BEER protocol frames until the token appears in a decoded message."""
         self.sock.settimeout(timeout)
+        buf = ""
         try:
             while True:
-                chunk = self.sock.recv(4096)
-                if not chunk:
-                    break
-                buf += chunk
-                # Case-insensitive search
-                if token_upper in buf.decode("utf-8", errors="ignore").upper():
+                ptype, seq, obj = recv_pkt(self.sock.makefile("rb"))
+                msg = obj.get("msg", "") if isinstance(obj, dict) else ""
+                buf += msg
+                if token.upper() in msg.upper():
                     break
         except socket.timeout:
             pass
-        # Return decoded buffer, ignoring errors
-        return buf.decode("utf-8", errors="ignore")
+        return buf
 
     def close(self) -> None:
         """Close the underlying socket."""

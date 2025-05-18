@@ -129,7 +129,7 @@ class GameSession(threading.Thread):
         # Broadcast callback for all waiting clients
         self._broadcast = broadcast
 
-        # Initialize reconnect controller (registers both tokens in PID_REGISTRY)
+        # Initialize reconnect controller (registers both tokens)
         from .server import PID_REGISTRY
         self.recon = ReconnectController(
             TURN_TIMEOUT,
@@ -155,9 +155,6 @@ class GameSession(threading.Thread):
         self._line_buffer: dict[int, str] = {}
         # Keeps track of whose turn it is (1 or 2); set properly in run()
         self.current: int | None = None
-
-        # Flag to avoid double-prompt immediately after a reconnect
-        self._just_rebound = False
 
     # -------------------- helpers --------------------
     # Removed duplicate _send and _send_grid methods; using io_utils.send and send_grid directly
@@ -243,33 +240,19 @@ class GameSession(threading.Thread):
             self.current = current_player
 
             while True:
-                # Poll both sockets for disconnect before each turn (handle simultaneous drops)
+                # Poll both sockets for real disconnect before each turn
                 dropped_slots: list[int] = []
                 for idx in (1, 2):
-                    # Get current r/w for this slot
-                    r, w = self._file_pair(idx)
+                    r, _ = self._file_pair(idx)
                     sock = r.buffer.raw._sock
-                    # Poll socket for disconnect before each turn
-                    readable, _, _ = select.select([sock], [], [], 0)
-                    if readable:
-                        print(f"[INFO] Socket readable for player {idx} during poll — checking for EOF")
-                        # Peek for disconnect, allowing reconnect window
-                        line = safe_readline(r, lambda: self.recon.wait(idx))
-                        # If no data but a new socket arrived, rebind and refresh handles
-                        if not line and self._rebind_if_needed(idx):
-                            r, w = self._file_pair(idx)
-                            sock = r.buffer.raw._sock
-                            line = safe_readline(r, lambda: self.recon.wait(idx))
-                        # If still no data, mark slot dropped
-                        if not line:
-                            print(f"[INFO] EOF/no-data on player {idx}'s socket detected")
-                            dropped_slots.append(idx)
+                    # Peek for EOF only (do not consume any data)
+                    if self._is_eof(sock):
+                        print(f"[INFO] EOF on player {idx}'s socket detected")
+                        dropped_slots.append(idx)
                 if dropped_slots:
                     print(f"[INFO] Disconnected slots detected: {dropped_slots}")
-                    # Delegate to helper; if it concludes match, exit run
                     if self._handle_disconnects(dropped_slots):
                         return
-                    # After handling disconnects (reconnect or promotion), restart loop
                     continue
                 # Process buffered lines if any
                 self._line_buffer.clear()
@@ -279,12 +262,8 @@ class GameSession(threading.Thread):
                 defender_idx = 2 if current_player == 1 else 1
                 defender_r, defender_w = self._file_pair(defender_idx)
 
-                # Request coordinate—only prompt here if we didn't just prompt in _rebind_slot()
-                if not self._just_rebound:
-                    self._prompt_current_player()
-                else:
-                    # skip this one, reset the flag
-                    self._just_rebound = False
+                # Request coordinate—always prompt exactly once here
+                self._prompt_current_player()
                 self._emit(Event(Category.TURN, "prompt", {"player": current_player}))
 
                 coord = recv_turn(self, attacker_r, attacker_w, defender_r, defender_w)
@@ -419,9 +398,7 @@ class GameSession(threading.Thread):
 
         # After rebinding, push the current boards to the re-attached player.
         self._sync_state(slot)
-        # Prompt the shooter immediately, but mark that we've done so
-        self._prompt_current_player()
-        self._just_rebound = True
+        # Don't prompt here; we'll get re-prompted in the next run() iteration
 
     # ------------------------------------------------------------
     # helper: push fresh boards to a just-reconnected player
@@ -576,7 +553,7 @@ class GameSession(threading.Thread):
         Send the canonical 'Your turn' frame to whichever slot is stored in self.current.
         """
         w = self.p1_file_w if self.current == 1 else self.p2_file_w
-        self._notify(w, "INFO Your turn – FIRE <coord> or QUIT")
+        self._notify(w, "INFO YOUR TURN – FIRE <coord> or QUIT")
 
 
 # End of GameSession module

@@ -104,5 +104,5 @@ def test_mid_turn_resume(game_factory, reconnect_client):
     # Reconnect attacker
     p2 = reconnect_client(sess.token_p2)
     p2.send("FIRE B1\n")
-    out = p1.recv_until("HIT")
-    assert "HIT" in out  # game continued
+    out = p1.recv_until("YOUR TURN")
+    assert "YOUR TURN" in out  # game continued

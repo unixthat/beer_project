@@ -58,3 +58,4 @@ def test_lobby_broadcast(monkeypatch):
         assert seq == 0
         assert msg is None
         assert obj == test_obj
+    
