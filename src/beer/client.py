@@ -127,6 +127,8 @@ def _recv_loop(sock: socket.socket, stop_evt: threading.Event, verbose: int) -> 
     """Continuously print messages from the server (framed packets only)."""
     global TOKEN
     br = sock.makefile("rb")  # buffered reader
+    # Track which player slot we're in (1=you, 2=opponent)
+    my_slot: int | None = None
 
     last_opp: Optional[list[str]] = None
     last_own: Optional[list[str]] = None
@@ -179,7 +181,8 @@ def _recv_loop(sock: socket.socket, stop_evt: threading.Event, verbose: int) -> 
             return
         winner = obj.get("winner")
         shots = obj.get("shots")
-        if winner == 1:
+        # Compare against our slot to know if *we* won
+        if my_slot is not None and winner == my_slot:
             print(f"YOU WON with {shots} shots")
         else:
             print(f"YOU LOST – opponent won with {shots} shots")
@@ -227,10 +230,14 @@ def _recv_loop(sock: socket.socket, stop_evt: threading.Event, verbose: int) -> 
                         parts = msg.split(maxsplit=2)
                         if len(parts) >= 3:
                             TOKEN = parts[2]
+                        # We are Player 1
+                        my_slot = 1
                         print(msg)
                         continue
                     # START opp: just display
                     if msg.startswith("START opp "):
+                        # We are Player 2
+                        my_slot = 2
                         print(msg)
                         continue
                     # Handle unknown-token error silently: reset persistent token, do not display

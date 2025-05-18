@@ -461,14 +461,8 @@ class GameSession(threading.Thread):
         result_line = f"[GAME] Match finished – P{winner} wins by {reason} in {shots} shots."
         print(result_line)
 
-        # Emit end-of-game event
+        # Emit end-of-game event (EventRouter will broadcast exactly one end-frame per client)
         self._emit(Event(Category.TURN, "end", {"winner": winner, "reason": reason, "shots": shots}))
-        # Send structured end-of-game frames to clients so bots can handle WIN/LOSE
-        end_payload = {"type": "end", "winner": winner, "shots": shots}
-        io_send(win_w, self.io_seq, obj=end_payload)
-        self.io_seq += 1
-        io_send(lose_w, self.io_seq, obj=end_payload)
-        self.io_seq += 1
 
     # Spectator operations delegated to SpectatorHub
 
@@ -522,25 +516,27 @@ class GameSession(threading.Thread):
         """
         Close the given player's socket, unregister tokens, and conclude the match.
         """
-        # Determine socket and tokens
+        # Pick the loser's socket
         if slot == 1:
             sock = self.p1_sock
         else:
             sock = self.p2_sock
-        # Close socket
+
+        # 1) Conclude the match while sockets are still open
+        winner = 2 if slot == 1 else 1
+        self._conclude(winner, reason=reason)
+
+        # 2) Now shut down and close only the loser's socket
         try:
             sock.shutdown(socket.SHUT_RDWR)
         except Exception:
             pass
         sock.close()
-        # Unregister reconnect tokens
-        from .server import PID_REGISTRY
 
+        # 3) Unregister reconnect tokens
+        from .server import PID_REGISTRY
         PID_REGISTRY.pop(self.token_p1, None)
         PID_REGISTRY.pop(self.token_p2, None)
-        # Determine winner
-        winner = 2 if slot == 1 else 1
-        self._conclude(winner, reason=reason)
 
     # -----
     # Reconnect helpers (installed by cursor-fix-reconnect)
