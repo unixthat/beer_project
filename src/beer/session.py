@@ -258,6 +258,7 @@ class GameSession(threading.Thread):
                 self._emit(Event(Category.TURN, "prompt", {"player": current_player}))
 
                 coord = recv_turn(self, attacker_r, attacker_w, defender_r, defender_w)
+                print(f"[DEBUG SERVER] recv_turn returned: {coord!r}")
                 if coord == "DEFENDER_LEFT":
                     # defender dropped mid-turn → try reconnect first
                     if self.recon.wait(defender_idx):
