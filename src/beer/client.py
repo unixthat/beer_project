@@ -122,7 +122,9 @@ def _prompt() -> None:
 _prompt_shown = False
 
 
-def _recv_loop(sock: socket.socket, stop_evt: threading.Event, verbose: int, cheat_mode: bool, cheater: Cheater) -> None:  # pragma: no cover
+def _recv_loop(
+    sock: socket.socket, stop_evt: threading.Event, verbose: int, cheat_mode: bool, cheater: Cheater
+) -> None:  # pragma: no cover
     global _prompt_shown
 
     """Continuously print messages from the server (framed packets only)."""

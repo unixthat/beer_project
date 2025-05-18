@@ -15,7 +15,7 @@ import time
 import logging
 import argparse
 import signal
-from typing import Optional
+from typing import Optional, Any
 import itertools
 
 from .session import GameSession
@@ -132,10 +132,19 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
     _parse_cli_flags(sys.argv)
 
     print(f"[INFO] BEER server listening on {HOST}:{PORT}")
-    # lobby holds tuples of (conn, reconnect_token) where token is PID-token or None
+    # lobby holds tuples of (conn, reconnect_token)
     lobby: list[tuple[socket.socket, Optional[str]]] = []
     current_session: GameSession | None = None
     session_ready = threading.Event()
+
+    # Broadcast helper: send to every waiting client in the lobby
+    def lobby_broadcast(msg: str | None, obj: Any | None = None) -> None:
+        for sock, _ in lobby:
+            try:
+                wfile = sock.makefile("w")
+                io_send(wfile, 0, msg=msg, obj=obj)
+            except Exception:
+                pass
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_sock:
         server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -168,51 +177,37 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
                 # Generate or reuse PID-tokens
                 t1 = token1 or f"PID{next(_pid_counter)}"
                 t2 = token2 or f"PID{next(_pid_counter)}"
-                # Instantiate session (ReconnectController inside will register tokens)
+                # Instantiate session (ReconnectController inside will register tokens),
+                # passing in our unified lobby broadcast
                 current_session = GameSession(
-                    c1, c2, ships=ships_list, token_p1=t1, token_p2=t2, session_ready=session_ready
+                    c1,
+                    c2,
+                    ships=ships_list,
+                    token_p1=t1,
+                    token_p2=t2,
+                    session_ready=session_ready,
+                    broadcast=lobby_broadcast,
                 )
 
                 # Temporary event router – converts to debug log for now.
                 router = EventRouter(current_session)
                 current_session.subscribe(router)
 
-                # Monitor and loop
+                # Monitor the match, then re-queue both players (no more "spectators" here)
                 def _monitor_session(sess: GameSession) -> None:
                     sess.join()
-                    # Report match result
                     winner = sess.winner or 0
                     reason = sess.win_reason or ""
                     print(f"[INFO] Match completed – P{winner} won by {reason}.")
-                    # Re-queue any spectators as fresh lobby entries (no PID token)
-                    with sess.spec._lock:
-                        spectators = list(sess.spec._sockets)
-                        tokens = [sess.spec._tokens.get(s) for s in spectators]
-                        sess.spec._sockets.clear()
-                        sess.spec._writers.clear()
-                        sess.spec._tokens.clear()
-                    for spec_sock, tok in zip(spectators, tokens):
-                        lobby.append((spec_sock, tok))
-                    if spectators:
-                        print(f"[INFO] Re-queued {len(spectators)} spectator(s) for new match")
-                    # Determine winner and loser sockets/tokens
+                    # Re-queue both players back into lobby
                     if winner == 1:
                         w_sock, w_tok = sess.p1_sock, sess.token_p1
                         l_sock, l_tok = sess.p2_sock, sess.token_p2
                     else:
                         w_sock, w_tok = sess.p2_sock, sess.token_p2
                         l_sock, l_tok = sess.p1_sock, sess.token_p1
-                    # After game end, re-queue players per queue policy
                     requeue_players(lobby, (w_sock, w_tok), (l_sock, l_tok), reason)
-                    # If there's only one player left in the lobby, let them know they're waiting
-                    if len(lobby) == 1:
-                        lone_sock, _ = lobby[0]
-                        try:
-                            wfile = lone_sock.makefile("w")
-                            io_send(wfile, 0, msg="INFO Waiting for another player to join")
-                        except Exception:
-                            pass
-                    print("[INFO] Re-queued players for new match")
+                    # Immediately try to start the next match
                     _try_pair_lobby()
 
                 current_session.start()
@@ -249,15 +244,9 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
                             continue
                         # Fresh join: remember candidate token for later lobby enqueue
                         token_str = candidate
-                # After reconnect handshake, if a game is running, attach as spectator
-                if current_session and current_session.is_alive() and session_ready.is_set():
-                    # client sent TOKEN <pid> earlier, stored in token_str
-                    current_session.spec.add(conn, token_str)
-                    print("[INFO] Spectator attached")
-                    continue
-                # Fresh join → add to lobby with client PID token (if any)
+                # Always treat new connections as waiting/spectating clients
                 lobby.append((conn, token_str))
-                print(f"[DEBUG] Client added to lobby with token {token_str!r} (len={len(lobby)})")
+                print(f"[DEBUG] Client added to lobby with token {token_str!r} (lobby size={len(lobby)})")
                 _try_pair_lobby()
         finally:
             for sock, _ in lobby:

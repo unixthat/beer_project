@@ -1,5 +1,6 @@
 from collections import deque
 
+
 # Local helper to detect reveal-grid rows without importing client (break circular dependency)
 def _is_reveal_grid(rows: list[str]) -> bool:
     """Return True if rows contain any non-dot cell (i.e. a ship letter)."""
@@ -9,11 +10,13 @@ def _is_reveal_grid(rows: list[str]) -> bool:
                 return True
     return False
 
+
 class Cheater:
     """
     Tracks the defender's ship locations from the one reveal-grid
     packet the server gives you, then hands out exactly those coords.
     """
+
     def __init__(self):
         self._targets = deque()
         self._seeded = False

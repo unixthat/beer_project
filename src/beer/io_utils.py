@@ -17,12 +17,7 @@ import socket
 
 
 def send(
-    w: TextIO,
-    seq: int,
-    ptype: PacketType = PacketType.GAME,
-    *,
-    msg: str | None = None,
-    obj: Any | None = None
+    w: TextIO, seq: int, ptype: PacketType = PacketType.GAME, *, msg: str | None = None, obj: Any | None = None
 ) -> bool:
     print(f"[DBG send] seq={seq} msg={msg} obj={obj}")
     payload = obj if obj is not None else {"msg": msg}
@@ -143,15 +138,15 @@ def recv_turn(
                 send(writer, session.io_seq, msg=f"ERR {e}")
                 session.io_seq += 1
                 continue
-            if session.spec.is_spectator(file):
-                send(writer, session.io_seq, msg="ERR Spectators cannot issue commands")
-                session.io_seq += 1
-                continue
             if sock is def_sock:
                 if isinstance(cmd, ChatCommand):
-                    session.io_seq = chat_broadcast([
-                        session.p1_file_w, session.p2_file_w
-                    ], session.io_seq, 2, cmd.text, {"name": "P2", "msg": cmd.text})
+                    session.io_seq = chat_broadcast(
+                        [session.p1_file_w, session.p2_file_w],
+                        session.io_seq,
+                        2,
+                        cmd.text,
+                        {"name": "P2", "msg": cmd.text},
+                    )
                     continue
                 if isinstance(cmd, QuitCommand):
                     session._conclude(1, reason="concession")
@@ -164,9 +159,9 @@ def recv_turn(
                 session.io_seq += 1
                 continue
             if isinstance(cmd, ChatCommand):
-                session.io_seq = chat_broadcast([
-                    session.p1_file_w, session.p2_file_w
-                ], session.io_seq, 1, cmd.text, {"name": "P1", "msg": cmd.text})
+                session.io_seq = chat_broadcast(
+                    [session.p1_file_w, session.p2_file_w], session.io_seq, 1, cmd.text, {"name": "P1", "msg": cmd.text}
+                )
                 continue
             if isinstance(cmd, QuitCommand):
                 return "QUIT"

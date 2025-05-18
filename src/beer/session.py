@@ -43,8 +43,16 @@ from typing import TextIO, Any, Callable, List
 
 from .battleship import Board, SHIPS, parse_coordinate, SHIP_LETTERS
 from .common import PacketType
-from .io_utils import send as io_send, send_grid, send_opp_grid, safe_readline, chat_broadcast, recv_turn, refresh_views
-from .spectator_hub import SpectatorHub
+from .io_utils import (
+    send as io_send,
+    send_grid,
+    send_opp_grid,
+    safe_readline,
+    chat_broadcast,
+    recv_turn,
+    refresh_views,
+    grid_rows,
+)
 from .reconnect_controller import ReconnectController
 from .placement_wizard import run as place_ships
 from . import config as _cfg
@@ -58,7 +66,15 @@ class GameSession(threading.Thread):
     """Thread managing a single two-player match."""
 
     def __init__(
-        self, p1: socket.socket, p2: socket.socket, *, token_p1: str, token_p2: str, ships=None, session_ready=None
+        self,
+        p1: socket.socket,
+        p2: socket.socket,
+        *,
+        token_p1: str,
+        token_p2: str,
+        ships=None,
+        session_ready=None,
+        broadcast: Callable[[str | None, Any | None], None],
     ):
         """Create a thread that manages a full two-player match.
 
@@ -110,13 +126,13 @@ class GameSession(threading.Thread):
         self._notify = _notify
         # Convenience for reconnect notifications to player slots
         self._notify_player = lambda slot, txt: self._notify(self.p1_file_w if slot == 1 else self.p2_file_w, txt)
-        # Spectator management
-        self.spec = SpectatorHub(self._notify)
-        # Reconnect controller (handles wait windows and token reattachment)
-        from .server import PID_REGISTRY
+        # Broadcast callback for all waiting clients
+        self._broadcast = broadcast
 
+        # Initialize reconnect controller (registers both tokens in PID_REGISTRY)
+        from .server import PID_REGISTRY
         self.recon = ReconnectController(
-            _cfg.RECONNECT_TIMEOUT,
+            TURN_TIMEOUT,
             self._notify_player,
             self.token_p1,
             self.token_p2,
@@ -208,8 +224,10 @@ class GameSession(threading.Thread):
         self.io_seq += 1
         send_opp_grid(self.p2_file_w, self.io_seq, self.board_p1)
         self.io_seq += 1
-        # Snapshot for any connected spectators
-        self.spec.snapshot(self.board_p1, self.board_p2)
+        # Snapshot for any waiting clients
+        rows_p1 = grid_rows(self.board_p1, reveal=True)
+        rows_p2 = grid_rows(self.board_p2, reveal=True)
+        self._broadcast(None, {"type": "spec_grid", "rows_p1": rows_p1, "rows_p2": rows_p2})
 
         # Signal ready for spectators
         if self.session_ready:
@@ -288,20 +306,8 @@ class GameSession(threading.Thread):
                     return
 
                 if coord == "QUIT":
-                    # Player conceded mid-turn → attempt spectator promotion
-                    print(f"[INFO] Player {current_player} conceded – attempting spectator promotion")
-                    if self.spec.promote(current_player, self):
-                        # promoted a spectator into this slot; start new game
-                        continue
-                    # no spectators: end the session
-                    print(f"[INFO] No spectators available – ending match")
-                    # Inform the winner that their opponent quit by concession
-                    winner = 2 if current_player == 1 else 1
-                    win_w = self.p1_file_w if winner == 1 else self.p2_file_w
-                    self._notify(win_w, "INFO Opponent quit – you win by concession")
-                    # Confirm to the quitter that they conceded
-                    lose_w = self.p1_file_w if current_player == 1 else self.p2_file_w
-                    self._notify(lose_w, "INFO You have conceded the match")
+                    # Player conceded mid-turn → end session
+                    print(f"[INFO] Player {current_player} conceded – ending match")
                     self.drop_and_deregister(current_player, reason="concession")
                     return
 
@@ -336,8 +342,9 @@ class GameSession(threading.Thread):
                 self.io_seq += 1
                 io_send(defender_w, self.io_seq, msg=defender_msg)
                 self.io_seq += 1
-                # Send per-shot messages to all spectators via hub in one pass
-                self.spec.broadcast_msgs(attacker_msg, defender_msg)
+                # Broadcast per-shot messages to all waiting clients
+                self._broadcast(attacker_msg, None)
+                self._broadcast(defender_msg, None)
 
                 # Count valid shot (hit or miss)
                 if result in {"hit", "miss"}:
@@ -380,14 +387,18 @@ class GameSession(threading.Thread):
                 # After every *two* half-turns broadcast a fresh dual-board to spectators
                 self._half_turn_counter += 1
                 if self._half_turn_counter % 2 == 0:
-                    self.spec.snapshot(self.board_p1, self.board_p2)
+                    rows_p1 = grid_rows(self.board_p1, reveal=True)
+                    rows_p2 = grid_rows(self.board_p2, reveal=True)
+                    self._broadcast(None, {"type": "spec_grid", "rows_p1": rows_p1, "rows_p2": rows_p2})
 
                 # Next player's turn
                 current_player = 2 if current_player == 1 else 1
                 self.current = current_player
         finally:
-            # One last board snapshot for any connected spectators.
-            self.spec.snapshot(self.board_p1, self.board_p2)
+            # One last board snapshot for any waiting clients
+            rows_p1 = grid_rows(self.board_p1, reveal=True)
+            rows_p2 = grid_rows(self.board_p2, reveal=True)
+            self._broadcast(None, {"type": "spec_grid", "rows_p1": rows_p1, "rows_p2": rows_p2})
             # Cleanup reconnect tokens
             from .server import PID_REGISTRY
 
@@ -504,8 +515,7 @@ class GameSession(threading.Thread):
                 new_sock = self.recon.take_new_socket(idx)
                 self._rebind_slot(idx, new_sock)
                 continue
-            if self.spec.promote(idx, self):
-                continue
+            # No recon and no in-session promotion → mark as failure
             failed.append(idx)
         if failed:
             if set(failed) == {1, 2}:
@@ -541,6 +551,7 @@ class GameSession(threading.Thread):
 
         # 3) Unregister reconnect tokens
         from .server import PID_REGISTRY
+
         PID_REGISTRY.pop(self.token_p1, None)
         PID_REGISTRY.pop(self.token_p2, None)
 
