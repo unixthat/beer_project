@@ -140,6 +140,9 @@ class GameSession(threading.Thread):
         # Keeps track of whose turn it is (1 or 2); set properly in run()
         self.current: int | None = None
 
+        # Flag to avoid double-prompt immediately after a reconnect
+        self._just_rebound = False
+
     # -------------------- helpers --------------------
     # Removed duplicate _send and _send_grid methods; using io_utils.send and send_grid directly
 
@@ -253,8 +256,12 @@ class GameSession(threading.Thread):
                 defender_idx = 2 if current_player == 1 else 1
                 defender_r, defender_w = self._file_pair(defender_idx)
 
-                # Request coordinate (do NOT mirror to spectators)
-                self._notify(attacker_w, "INFO Your turn – FIRE <coord> or QUIT")
+                # Request coordinate—only prompt here if we didn't just prompt in _rebind_slot()
+                if not self._just_rebound:
+                    self._prompt_current_player()
+                else:
+                    # skip this one, reset the flag
+                    self._just_rebound = False
                 self._emit(Event(Category.TURN, "prompt", {"player": current_player}))
 
                 coord = recv_turn(self, attacker_r, attacker_w, defender_r, defender_w)
@@ -395,8 +402,9 @@ class GameSession(threading.Thread):
 
         # After rebinding, push the current boards to the re-attached player.
         self._sync_state(slot)
-        # Always re-prompt the shooter
+        # Prompt the shooter immediately, but mark that we've done so
         self._prompt_current_player()
+        self._just_rebound = True
 
     # ------------------------------------------------------------
     # helper: push fresh boards to a just-reconnected player
