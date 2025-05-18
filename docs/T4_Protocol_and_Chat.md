@@ -24,59 +24,55 @@ This document summarizes our Tier 4.1–4.3 implementations: the in-game chat ch
 
 ────────────────────────────────────────────────────────
 
-## T4.1 Custom Low-Level Protocol with CRC-32
+## T4.1 Custom Low-Level AEAD Framing
 
-### Packet Structure
-| Offset | Field          | Size  | Description                                 |
-|:------:|----------------|:-----:|---------------------------------------------|
-| 0–1    | `magic`        | 2 B   | Fixed 0xBEEF                                |
-| 2      | `version`      | 1 B   | Protocol version (1)                        |
-| 3      | `ptype`        | 1 B   | PacketType enum (GAME=0, CHAT=1, …)         |
-| 4–7    | `seq`          | 4 B   | Monotonic u32 BE, also used as CTR nonce    |
-| 8–11   | `length`       | 4 B   | Payload length in bytes                     |
-| 12–15  | `crc32`        | 4 B   | CRC-32 over (header[0:12] + payload)        |
-| 16–   | `payload`      | N B   | JSON-encoded UTF-8 object                   |
+### AEAD Packet Structure
+| Offset | Field        | Size  | Description                                       |
+|:------:|--------------|:-----:|---------------------------------------------------|
+| 0–1    | `magic`      | 2 B   | Fixed value 0xBEEF                                |
+| 2      | `version`    | 1 B   | Protocol version (1)                              |
+| 3      | `ptype`      | 1 B   | PacketType enum (GAME=0, CHAT=1, …)               |
+| 4–7    | `seq`        | 4 B   | Monotonic u32 BE (sequence number)                |
+| 8–19   | `nonce`      | 12 B  | Random IV/nonce for AES-GCM                       |
+| 20–23  | `length`     | 4 B   | Ciphertext+tag length (bytes)                     |
+| 24–   | `data`       | N B   | AES-GCM ciphertext (N-16) + 16 B authentication tag|
 
 ### Implementation Highlights
-- **Framing** and **unframing** in `src/beer/common.py`:
-  - `_HEADER_STRUCT = struct.Struct(">HBBII")`, `HEADER_LEN = 16 + 4`
-  - `pack(ptype, seq, obj)` → dump JSON → _(encrypt?)_ → header + crc + payload
-  - `unpack(stream)` → read header → validate magic/version → read payload → check CRC → _(decrypt?)_ → parse JSON
-- **Checksum**
-  - CRC-32 via `zlib.crc32(...)&0xFFFFFFFF`
-  - Covers both header bytes 0–11 and the (optional encrypted) payload
-- **Error policy**
-  - On magic/version mismatch or CRC failure → `FrameError`/`CrcError` → disconnect
-  - On premature close → `IncompleteError` → clean exit
-  - No retransmit or NAK; we choose fail-fast and rely on TCP reconnection logic
+- AEAD framing/unframing is handled in `src/beer/encryption.py` and delegated from `common.py`.
+- Header is defined by `Struct(">HBBI12sI")`, constants in `encryption.HEADER_STRUCT`.
+- `pack(ptype, seq, payload)` → JSON→bytes → AES-GCM encrypt → header + ciphertext + tag.
+- `unpack(frame)` → parse header → decrypt ciphertext+tag → JSON parse.
+- Integrity & authenticity via AES-GCM; no separate CRC needed.
+- Replay & order: `common.recv_pkt` uses per-stream `ReplayWindow` to drop old or duplicated seqs.
 
 ────────────────────────────────────────────────────────
 
 ## T4.3 Encryption Layer (AES-CTR)
 
 ### Algorithm & Integration
-- **Cipher**: AES in CTR mode (via `cryptography.hazmat`)
-- **Key**: 16/24/32-byte key provided out-of-band (CLI `--secure[=<hex>]` or env `BEER_KEY`)
-- **Nonce/IV**: 16 bytes = 8 byte big-endian `seq` + 8 zero bytes
+- **Cipher**: AES-GCM (AEAD) via `cryptography.hazmat.primitives.ciphers.aead.AESGCM`.
+- **Key**: 16/24/32-byte key from out-of-band (`--secure` flag or `BEER_KEY` env).
+- **Nonce/IV**: 12 random bytes per-packet via `os.urandom(12)`.
 - **Flow**:
   1. JSON payload → UTF-8 bytes
-  2. **Encrypt** payload with AES-CTR(nonce) if `_SECRET_KEY` set
-  3. Compute CRC-32 over header + encrypted payload
-  4. Send header + CRC + encrypted payload
-  5. Receiver reads, checks CRC, then **decrypts**, then JSON-parse
+  2. **Encrypt** payload → AES-GCM ciphertext + 16 B tag
+  3. Build header (magic, version, ptype, seq, nonce, length)
+  4. Transmit header + ciphertext+tag
+  5. Receiver reads, decrypts/authenticates via AES-GCM, then JSON parse.
 
-### Replay & IV Management
-- **Uniqueness** guaranteed as long as `seq` increments monotonically per-stream
-- No explicit replay detection: receiver will happily decrypt and accept any valid CRC frame
-- **Future enhancement**: track last-seen `seq` and drop duplicates
+### Replay, Order & Rekeying
+- **Replay protection**: per-stream `ReplayWindow` drops any `seq` ≤ highest seen, allows limited out-of-order within a window size.
+- **Out-of-order**: frames with `seq` > highest-window_size are accepted and buffered.
+- **Rekeying**: stubbed auto-rekey after packet/time thresholds; ECDH handshake in `src/beer/keyexchange.py` enables future key rotation.
 
-### Partial Corruption
-- **CRC mismatch** → `CrcError` → disconnect
-- No in-protocol recovery
+### Partial Corruption & Authentication
+- **Tampering** on ciphertext or auth tag → decrypt fails (`InvalidTag`) → frame dropped or disconnect.
+- **Header errors** (magic/version mismatch) → `FrameError`.
 
 ### Key Exchange & Assumptions
-- **Out-of-band** key distribution only
-- No Diffie-Hellman or KEM in the protocol
-- Suitable for demo/enforced LAN scenarios
+- **Key exchange** via ECDH handshake stubs in `keyexchange.py` (client_hello/server_hello + HKDF).
+- **Handshake** messages sent in clear-text before framing to derive per-session AES-GCM keys.
+- Clients send `HELLO <pubA>`, server replies `HELLO <pubB>`, derive `session_key = HKDF(pubA||pubB)`.
+- Current implementation assumes static key by default; handshake optional if invoked.
 
 ────────────────────────────────────────────────────────

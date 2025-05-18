@@ -2,6 +2,8 @@ import pytest
 import json
 from io import BytesIO
 
+import beer.common as common  # disable encryption for CRC tests
+common._SECRET_KEY = None
 from beer.common import pack, unpack, enable_encryption, PacketType, CrcError, DEFAULT_KEY
 
 
@@ -40,3 +42,6 @@ def test_aes_ctr_encryption_roundtrip():
     assert ptype2 == ptype
     assert seq2 == seq
     assert obj2 == obj
+    # Restore encryption flag for other tests
+    common._SECRET_KEY = None
+    # done

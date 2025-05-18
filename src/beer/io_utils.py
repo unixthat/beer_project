@@ -14,6 +14,7 @@ from .common import PacketType, send_pkt
 from .battleship import Board
 from .commands import parse_command, ChatCommand, FireCommand, QuitCommand, CommandParseError
 import socket
+from .encryption import get_rekey_pub
 
 
 def send(
@@ -111,6 +112,12 @@ def chat_broadcast(writers: list[TextIO], seq: int, idx: int, chat_txt: str, pay
     for w in writers:
         send(w, seq, PacketType.CHAT, msg=f"[CHAT] P{idx}: {chat_txt}", obj=payload)
         seq += 1
+    # Rekey handshake if pending
+    pub = get_rekey_pub()
+    if pub is not None:
+        for w in writers:
+            send(w, seq, PacketType.REKEY, obj=pub.hex())
+            seq += 1
     return seq
 
 

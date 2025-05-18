@@ -123,6 +123,13 @@ class GameSession(threading.Thread):
             # Send a GAME packet with text or obj payload
             io_send(wfile, self.io_seq, msg=msg, obj=obj)
             self.io_seq += 1
+            # Rekey handshake if pending
+            from .encryption import get_rekey_pub
+            pub = get_rekey_pub()
+            if pub is not None:
+                # Send REKEY packet with our new public key
+                io_send(wfile, self.io_seq, PacketType.REKEY, obj=pub.hex())
+                self.io_seq += 1
 
         self._notify = _notify
         # Convenience for reconnect notifications to player slots

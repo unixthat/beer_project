@@ -23,6 +23,10 @@ from .common import (
 from .battleship import SHIP_LETTERS
 from . import config as _cfg
 from .cheater import Cheater
+from .common import send_pkt
+from .keyexchange import generate_key_pair, derive_session_key, client_hello, server_hello
+from .encryption import enable_encryption
+from . import encryption as _encryption
 
 HOST = _cfg.DEFAULT_HOST
 PORT = _cfg.DEFAULT_PORT
@@ -376,6 +380,18 @@ def _client(s, args, cheat_mode: bool = False):
             print("\n[INFO] Client exiting.")
             return
 
+    # Perform ECDH encryption handshake if no static key is set
+    if _encryption._secret_key is None:
+        # Initiate handshake: client hello
+        c_pub, c_priv = client_hello()
+        s.sendall(f"HELLO {c_pub.hex()}\n".encode())
+        # Wait for server hello
+        data = s.recv(8192)
+        if data.startswith(b"HELLO "):
+            _, hex_pub = data.strip().split(b" ", 1)
+            server_pub = bytes.fromhex(hex_pub.decode())
+            session_key = derive_session_key(c_priv, server_pub)
+            enable_encryption(session_key)
     stop_evt = threading.Event()
     cheater = Cheater() if cheat_mode else None
     receiver = threading.Thread(target=_recv_loop, args=(s, stop_evt, _VERBOSE_LEVEL, cheat_mode, cheater), daemon=True)

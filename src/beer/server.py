@@ -20,13 +20,16 @@ import itertools
 
 from .session import GameSession
 from .reconnect_controller import ReconnectController
-from .common import enable_encryption, DEFAULT_KEY
+from .common import send_pkt, recv_pkt
 from .battleship import SHIPS
 from . import config as _cfg
 from .events import Event
 from .common import PacketType
 from .router import EventRouter
 from .io_utils import send as io_send
+from .keyexchange import generate_key_pair, derive_session_key, client_hello, server_hello
+from .encryption import enable_encryption
+from . import encryption as _encryption
 
 HOST = _cfg.DEFAULT_HOST
 PORT = _cfg.DEFAULT_PORT
@@ -176,7 +179,7 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
                 (c2, token2) = lobby.pop(0)
                 # Prevent duplicate tokens in a new match
                 if token1 and token2 and token1 == token2:
-                    logging.warning(f"Duplicate token {token1} in lobby; resetting second slot to fresh token") 
+                    logging.warning(f"Duplicate token {token1} in lobby; resetting second slot to fresh token")
                     token2 = None
                 logging.info("Launching new game session")
                 ships_list = ONE_SHIP_LIST if USE_ONE_SHIP else SHIPS
@@ -251,6 +254,18 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
                             continue
                         # Fresh join: remember candidate token for later lobby enqueue
                         token_str = candidate
+                # Perform ECDH encryption handshake if no static key is set
+                if _encryption._secret_key is None:
+                    # Read client's HELLO with public key
+                    data = conn.recv(8192)
+                    if data.startswith(b"HELLO "):
+                        _, hex_pub = data.strip().split(b" ", 1)
+                        client_pub = bytes.fromhex(hex_pub.decode())
+                        # Generate server hello and derive session key
+                        server_pub, server_priv = server_hello(client_pub)
+                        conn.sendall(f"HELLO {server_pub.hex()}\n".encode())
+                        session_key = derive_session_key(server_priv, client_pub)
+                        enable_encryption(session_key)
                 # Always treat new connections as waiting/spectating clients
                 lobby.append((conn, token_str))
                 print(f"[DEBUG] Client added to lobby with token {token_str!r} (lobby size={len(lobby)})")

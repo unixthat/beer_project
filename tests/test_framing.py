@@ -14,6 +14,9 @@ from beer.common import (
     recv_pkt,
 )
 
+# Disable encryption to test legacy CRC framing
+common._SECRET_KEY = None
+
 
 def test_pack_unpack_roundtrip():
     obj = {"foo": "bar", "nested": [1, 2, {"x": True}]}
