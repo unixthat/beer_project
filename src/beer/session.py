@@ -385,11 +385,15 @@ class GameSession(threading.Thread):
         # After rebinding, push the current boards to the re-attached player.
         self._sync_state(slot)
 
-        # … and, if it's still the *other* player's turn, remind them to shoot
-        other_slot = 2 if slot == 1 else 1
-        if self.current == other_slot:  # shooter is waiting
-            attacker_w = self.p1_file_w if other_slot == 1 else self.p2_file_w
+        # If the re-attaching player is the shooter, prompt them; otherwise remind whoever's turn it still is
+        if slot == self.current:
+            attacker_w = self.p1_file_w if slot == 1 else self.p2_file_w
             self._notify(attacker_w, "INFO Your turn – FIRE <coord> or QUIT")
+        else:
+            other_slot = 2 if slot == 1 else 1
+            if self.current == other_slot:
+                attacker_w = self.p1_file_w if other_slot == 1 else self.p2_file_w
+                self._notify(attacker_w, "INFO Your turn – FIRE <coord> or QUIT")
 
     # ------------------------------------------------------------
     # helper: push fresh boards to a just-reconnected player

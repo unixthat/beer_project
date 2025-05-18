@@ -98,7 +98,10 @@ def recv_turn(
         remaining = TURN_TIMEOUT - (_time.time() - start)
         if remaining <= 0:
             return None
+        # always handle the shooter first if both sockets are ready
         readable, _, _ = _select.select([att_sock, def_sock], [], [], remaining)
+        if att_sock in readable and def_sock in readable:
+            readable.sort(key=lambda s: 0 if s is att_sock else 1)
         if not readable:
             return None
         for sock in readable:
@@ -113,6 +116,10 @@ def recv_turn(
                 raw_line = safe_readline(file, lambda: session.recon.wait(slot))
             # If still no line, genuine timeout/disconnect
             if not raw_line:
+                # defender vanished mid-turn → signal outer loop
+                if sock is def_sock:
+                    return "DEFENDER_LEFT"
+                # attacker timed out / disconnected
                 return None
             line = raw_line.strip()
             # Spectator command guard (G-8)
