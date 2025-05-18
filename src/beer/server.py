@@ -202,6 +202,14 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
                         l_sock, l_tok = sess.p1_sock, sess.token_p1
                     # After game end, re-queue players per queue policy
                     requeue_players(lobby, (w_sock, w_tok), (l_sock, l_tok), reason)
+                    # If there's only one player left in the lobby, let them know they're waiting
+                    if len(lobby) == 1:
+                        lone_sock, _ = lobby[0]
+                        try:
+                            wfile = lone_sock.makefile("w")
+                            io_send(wfile, 0, msg="INFO Waiting for another player to join")
+                        except Exception:
+                            pass
                     print("[INFO] Re-queued players for new match")
                     _try_pair_lobby()
 

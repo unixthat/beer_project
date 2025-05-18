@@ -1,0 +1,53 @@
+from collections import deque
+
+# Local helper to detect reveal-grid rows without importing client (break circular dependency)
+def _is_reveal_grid(rows: list[str]) -> bool:
+    """Return True if rows contain any non-dot cell (i.e. a ship letter)."""
+    for row in rows:
+        for cell in row.split():
+            if cell != ".":
+                return True
+    return False
+
+class Cheater:
+    """
+    Tracks the defender's ship locations from the one reveal-grid
+    packet the server gives you, then hands out exactly those coords.
+    """
+    def __init__(self):
+        self._targets = deque()
+        self._seeded = False
+        # only fire once per turn
+        self._turn_ready = False
+
+    def feed_grid(self, rows: list[str]) -> None:
+        """
+        Call once on the very first grid-packet where _is_reveal_grid(rows)==True.
+        Extract every ship cell (A1…J10) into a queue.
+        """
+        if self._seeded or not _is_reveal_grid(rows):
+            return
+        for r, line in enumerate(rows):
+            for c, cell in enumerate(line.split()):
+                # any non-'.' in a reveal-grid is a ship letter
+                if cell != ".":
+                    coord = f"{chr(ord('A') + r)}{c+1}"
+                    self._targets.append(coord)
+        self._seeded = True
+
+    def notify_turn(self) -> None:
+        """
+        Called by the client when it receives the 'INFO Your turn' frame.
+        Allows exactly one shot to be pulled from the queue.
+        """
+        self._turn_ready = True
+
+    def next_shot(self) -> str | None:
+        """Yield your next target, or None when you've exhausted the list."""
+        # only fire when we've been signaled
+        if not self._turn_ready:
+            return None
+        self._turn_ready = False
+        if not self._targets:
+            return None
+        return self._targets.popleft()

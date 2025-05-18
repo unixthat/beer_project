@@ -43,7 +43,7 @@ from typing import TextIO, Any, Callable, List
 
 from .battleship import Board, SHIPS, parse_coordinate, SHIP_LETTERS
 from .common import PacketType
-from .io_utils import send as io_send, send_grid, safe_readline, chat_broadcast, recv_turn, refresh_views
+from .io_utils import send as io_send, send_grid, send_opp_grid, safe_readline, chat_broadcast, recv_turn, refresh_views
 from .spectator_hub import SpectatorHub
 from .reconnect_controller import ReconnectController
 from .placement_wizard import run as place_ships
@@ -203,6 +203,11 @@ class GameSession(threading.Thread):
             self.board_p1,
             self.board_p2,
         )
+        # Reveal opponent hidden grid for cheat clients
+        send_opp_grid(self.p1_file_w, self.io_seq, self.board_p2)
+        self.io_seq += 1
+        send_opp_grid(self.p2_file_w, self.io_seq, self.board_p1)
+        self.io_seq += 1
         # Snapshot for any connected spectators
         self.spec.snapshot(self.board_p1, self.board_p2)
 
@@ -291,12 +296,13 @@ class GameSession(threading.Thread):
                     return
                 elif coord is None:
                     # genuine timeout/no-EOF case → concession
+                    print(f"[INFO] Player {current_player} timed out – ending match")
                     self.drop_and_deregister(current_player, reason="timeout")
                     return
 
                 if coord == "QUIT":
                     # Player conceded mid-turn → end this session.
-                    # Spectator promotion into a fresh match is handled by the lobby.
+                    print(f"[INFO] Player {current_player} conceded – ending match")
                     self.drop_and_deregister(current_player, reason="concession")
                     return
 
