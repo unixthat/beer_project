@@ -281,28 +281,25 @@ def main() -> None:  # pragma: no cover
 
     logic = BotLogic(seed=args.seed)
 
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.connect((args.host, args.port))
-        wfile = s.makefile("w")
-        state = _BotState(logic, wfile)
-
-        stop_evt = threading.Event()
-        receiver = BotReceiver(s, state, stop_evt, verbose)
-        receiver.start()
-
-        # The bot has no stdin loop – all work is event-driven in receiver.
-        # Block main thread until receiver requests shutdown.
+    # keep playing until user hits Ctrl-C
+    while True:
         try:
-            while not stop_evt.is_set():
-                receiver.join(timeout=0.5)
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.connect((args.host, args.port))
+                wfile = s.makefile("w")
+                state = _BotState(logic, wfile)
+
+                stop_evt = threading.Event()
+                receiver = BotReceiver(s, state, stop_evt, verbose)
+                receiver.start()
+
+                # wait for game to finish (stop_evt set in _on_end)
+                while not stop_evt.is_set():
+                    receiver.join(timeout=0.5)
         except KeyboardInterrupt:
             logger.info("Bot interrupted by user – quitting")
-        finally:
-            stop_evt.set()
-            try:
-                s.shutdown(socket.SHUT_RDWR)
-            except Exception:
-                pass
+            break
+        # otherwise, loop will reconnect and re-enter the queue
 
 
 if __name__ == "__main__":  # pragma: no cover
