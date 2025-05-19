@@ -26,7 +26,7 @@ from . import config as _cfg
 from .events import Event
 from .common import PacketType
 from .router import EventRouter
-from .io_utils import send as io_send
+from .io_utils import send as io_send, grid_rows
 
 HOST = _cfg.DEFAULT_HOST
 PORT = _cfg.DEFAULT_PORT
@@ -176,7 +176,7 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
                 (c2, token2) = lobby.pop(0)
                 # Prevent duplicate tokens in a new match
                 if token1 and token2 and token1 == token2:
-                    logging.warning(f"Duplicate token {token1} in lobby; resetting second slot to fresh token") 
+                    logging.warning(f"Duplicate token {token1} in lobby; resetting second slot to fresh token")
                     token2 = None
                 logging.info("Launching new game session")
                 ships_list = ONE_SHIP_LIST if USE_ONE_SHIP else SHIPS
@@ -206,7 +206,28 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
                     winner = sess.winner or 0
                     reason = sess.win_reason or ""
                     print(f"[INFO] Match completed – P{winner} won by {reason}.")
-                    # Re-queue both players back into lobby
+                    # If match ended by concession, notify remaining spectators of the forfeiture
+                    if reason == "concession":
+                        lobby_broadcast(f"INFO Player {losing_tok} has forfeited – match ended by concession", None)
+                    # Notify current spectators of the match result
+                    shots = getattr(sess, 'win_shots', None) or 0
+                    winning_tok = sess.token_p1 if winner == 1 else sess.token_p2
+                    losing_tok = sess.token_p2 if winner == 1 else sess.token_p1
+                    result_msg = f"INFO {winning_tok} BEAT {losing_tok} IN {shots} SHOTS"
+                    # Broadcast result to all waiting spectators
+                    lobby_broadcast(result_msg, None)
+                    # Inform each spectator of their status and queue position
+                    for idx, (sock, _) in enumerate(lobby, start=1):
+                        # skip the next-up client (position 1)
+                        if idx == 1:
+                            continue
+                        try:
+                            wfile = sock.makefile("w")
+                            io_send(wfile, 0, msg="INFO You are now spectating")
+                            io_send(wfile, 0, msg=f"INFO You are currently number {idx} in the queue to play")
+                        except Exception:
+                            pass
+                    # Now re-queue both players back into lobby
                     if winner == 1:
                         w_sock, w_tok = sess.p1_sock, sess.token_p1
                         l_sock, l_tok = sess.p2_sock, sess.token_p2
@@ -253,7 +274,22 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
                         token_str = candidate
                 # Always treat new connections as waiting/spectating clients
                 lobby.append((conn, token_str))
-                print(f"[DEBUG] Client added to lobby with token {token_str!r} (lobby size={len(lobby)})")
+                # Inform and debug-log new waiting client
+                pos = len(lobby)
+                print(f"[DEBUG] Client added to lobby with token {token_str!r} (lobby size={pos})")
+
+                # if a game is already in progress, inform the new client:
+                if current_session and current_session.is_alive():
+                    wfile = conn.makefile("w")
+                    # Notify spectator status
+                    io_send(wfile, 0, msg="INFO You are now spectating")
+                    # Notify queue position
+                    io_send(wfile, 0, msg=f"INFO You are currently number {pos} in the queue to play")
+                    # Optionally ship them the current board immediately
+                    rows_p1 = grid_rows(current_session.board_p1, reveal=True)
+                    rows_p2 = grid_rows(current_session.board_p2, reveal=True)
+                    lobby_broadcast(None, {"type": "spec_grid", "rows_p1": rows_p1, "rows_p2": rows_p2})
+
                 _try_pair_lobby()
         finally:
             for sock, _ in lobby:

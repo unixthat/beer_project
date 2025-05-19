@@ -8,6 +8,10 @@ Frame layout (16-byte header + JSON payload):
 8-11 : len u32 (payload length)
 12-15: CRC-32 over header[0:12]+payload
 16-  : UTF-8 JSON payload
+
+Control frames:
+- ACK: PacketType.ACK with zero-length JSON payload; seq indicates acknowledged packet.
+- NAK: PacketType.NAK with zero-length JSON payload; seq indicates packet requested for retransmission.
 """
 
 from __future__ import annotations
@@ -18,6 +22,8 @@ import struct
 import zlib
 from io import BufferedReader, BufferedWriter
 from typing import Any, Final, Tuple
+import weakref
+from collections import OrderedDict
 
 from . import config as _cfg
 
@@ -36,6 +42,10 @@ _SECRET_KEY: bytes | None = None
 
 DEFAULT_KEY = _cfg.DEFAULT_KEY
 
+# Retransmit buffer: map each BufferedWriter to its recent {seq: raw_bytes}
+SEND_BUFFER_WINDOW = 32
+_send_buffers: weakref.WeakKeyDictionary[BufferedWriter, OrderedDict[int, bytes]] = weakref.WeakKeyDictionary()
+
 
 def enable_encryption(key: bytes) -> None:
     """Enable AES-CTR encryption for payload bytes (16-byte key)."""
@@ -48,12 +58,12 @@ def enable_encryption(key: bytes) -> None:
 
 
 class PacketType(int, enum.Enum):
-    """Enumerate BEER wire-protocol packet categories."""
+    """Enumerate BEER wire-protocol packet categories, including reliability control frames."""
 
     GAME = 0
     CHAT = 1
-    ACK = 2
-    ERROR = 3
+    ACK = 2           # Acknowledgement: seq carries the acknowledged packet number
+    NAK = 3           # Negative-ack: request retransmission of seq number
     OPP_GRID = 4
 
 
@@ -62,7 +72,10 @@ class FrameError(Exception):
 
 
 class CrcError(FrameError):
-    """Raised when a CRC-32 check fails while decoding a frame."""
+    """Raised when a CRC-32 check fails while decoding a frame, carrying the seq number."""
+    def __init__(self, seq: int):
+        super().__init__(f"CRC mismatch for seq {seq}")
+        self.seq = seq
 
 
 class IncompleteError(FrameError):
@@ -119,7 +132,8 @@ def unpack(stream: BufferedReader) -> Tuple[PacketType, int, Any]:
         raise IncompleteError("stream closed while reading payload")
     crc_actual = _crc32(hdr[:-4] + payload)
     if crc_actual != crc_expected:
-        raise CrcError("CRC mismatch")
+        # Sequence number is known from header
+        raise CrcError(seq)
     if _SECRET_KEY is not None and Cipher is not None:
         nonce = struct.pack(">Q", seq) + b"\0" * 8
         cipher = Cipher(algorithms.AES(_SECRET_KEY), modes.CTR(nonce), backend=default_backend())
@@ -135,7 +149,19 @@ def unpack(stream: BufferedReader) -> Tuple[PacketType, int, Any]:
 
 def send_pkt(w: BufferedWriter, ptype: PacketType, seq: int, obj: Any) -> None:
     """Write a single framed packet to buffered writer *w* and flush."""
-    w.write(pack(ptype, seq, obj))
+    # Prepare frame
+    raw = pack(ptype, seq, obj)
+    # Stash for possible retransmission
+    buf = _send_buffers.get(w)
+    if buf is None:
+        buf = OrderedDict()
+        _send_buffers[w] = buf
+    buf[seq] = raw
+    # Prune old entries beyond window
+    while len(buf) > SEND_BUFFER_WINDOW:
+        buf.popitem(last=False)
+    # Send on the wire
+    w.write(raw)
     w.flush()
 
 
@@ -153,4 +179,20 @@ __all__ = [
     "unpack",
     "send_pkt",
     "recv_pkt",
+    "handle_control_frame",
 ]
+
+def handle_control_frame(w: BufferedWriter, ptype: PacketType, seq: int) -> None:
+    """Process ACK/NAK frames on writer *w*: prune on ACK, retransmit on NAK."""
+    buf = _send_buffers.get(w)
+    if not buf:
+        return
+    if ptype == PacketType.ACK:
+        # Acknowledged, remove from buffer
+        buf.pop(seq, None)
+    elif ptype == PacketType.NAK:
+        # Retransmit this packet if we have it
+        data = buf.get(seq)
+        if data:
+            w.write(data)
+            w.flush()

@@ -11,12 +11,16 @@ import os
 import logging
 import time
 from pathlib import Path
+import sys
+import queue
 
 from .common import (
     PacketType,
     FrameError,
+    CrcError,
     IncompleteError,
     recv_pkt,
+    send_pkt,
     enable_encryption,
     DEFAULT_KEY,
 )
@@ -113,9 +117,16 @@ def _print_two_grids(
 # ------------------------------------------------------------
 
 
+try:
+    import readline
+except ImportError:
+    readline = None
+
 def _prompt() -> None:
-    """Display the user-input prompt."""
-    print(">> ", end="", flush=True)
+    """Display the user-input prompt, preserving any typed text."""
+    # Always clear the current line and print a fresh blank prompt
+    sys.stdout.write("\r\033[K>> ")
+    sys.stdout.flush()
 
 
 # Flag that controls whether the main loop has shown the ">> " prompt
@@ -129,7 +140,8 @@ def _recv_loop(
 
     """Continuously print messages from the server (framed packets only)."""
     global TOKEN
-    br = sock.makefile("rb")  # buffered reader
+    br = sock.makefile("rb")  # binary reader for framed packets
+    bw = sock.makefile("wb")  # binary writer for ACK/NAK
     # Track which player slot we're in (1=you, 2=opponent)
     my_slot: int | None = None
 
@@ -215,10 +227,18 @@ def _recv_loop(
         while True:
             try:
                 ptype, seq, obj = recv_pkt(br)  # type: ignore[arg-type]
+                # Acknowledge receipt
+                send_pkt(bw, PacketType.ACK, seq, None)
             except IncompleteError:
                 # Stream closed cleanly – exit receiver loop without warning.
                 stop_evt.set()
                 break
+            except CrcError as e:
+                if verbose >= 0:
+                    print(f"[WARN] CRC mismatch on seq {e.seq}, requesting retransmission.")
+                # Request retransmission of the bad frame
+                send_pkt(bw, PacketType.NAK, e.seq, None)
+                continue
             except FrameError as exc:
                 if verbose >= 0:
                     print(f"[WARN] Frame error: {exc}.")
@@ -267,7 +287,10 @@ def _recv_loop(
                         or (msg.startswith("ERR ") and not msg.startswith("ERR Unknown token "))
                         or msg.startswith("[INFO] ")
                     ):
-                        print(f"\r{msg}")
+                        # Print server INFO/ERR message and immediately reprint prompt
+                        print(f"\r{msg}", flush=True)
+                        # Reprint the input prompt so it's visible immediately
+                        _prompt()
                         # Reset prompt when the shooter should act again
                         if msg.startswith("INFO YOUR TURN") or msg.startswith("INFO Opponent has reconnected"):
                             _prompt_shown = False
@@ -345,14 +368,11 @@ def main() -> None:  # pragma: no cover – CLI entry
 
 # Internal client loop invoked from main
 def _client(s, args, cheat_mode: bool = False):
-    global _prompt_shown
-
     addr = (args.host, args.port)
-    # Retry loop: once-per-second until connected or interrupted
+    # Retry loop: connect or exit
     while True:
         try:
             s.connect(addr)
-            # Always send PID handshake for initial join or reconnect
             try:
                 s.sendall(f"TOKEN {TOKEN}\n".encode())
             except Exception:
@@ -364,22 +384,30 @@ def _client(s, args, cheat_mode: bool = False):
             return
         except (ConnectionRefusedError, OSError):
             print(f"[INFO] Server not ready at {addr}, retrying in 1s…", flush=True)
-            s.close()
-            import socket as _socket
-
-            s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
-        try:
-            import time
-
-            time.sleep(1)
-        except KeyboardInterrupt:
-            print("\n[INFO] Client exiting.")
-            return
-
+            try:
+                s.close()
+            except Exception:
+                pass
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        time.sleep(1)
     stop_evt = threading.Event()
     cheater = Cheater() if cheat_mode else None
     receiver = threading.Thread(target=_recv_loop, args=(s, stop_evt, _VERBOSE_LEVEL, cheat_mode, cheater), daemon=True)
     receiver.start()
+
+    # Spawn input thread for non-blocking, readline-powered prompt
+    input_queue = queue.Queue()
+    def _input_thread():
+        while not stop_evt.is_set():
+            try:
+                line = input(">> ")
+            except (EOFError, KeyboardInterrupt):
+                # Signal shutdown and unblock main loop
+                stop_evt.set()
+                input_queue.put(None)
+                break
+            input_queue.put(line)
+    threading.Thread(target=_input_thread, daemon=True).start()
 
     wfile = s.makefile("w")
 
@@ -389,40 +417,33 @@ def _client(s, args, cheat_mode: bool = False):
                 print("[INFO] Disconnected from server. Exiting client.")
                 break
 
-            # auto-fire in win mode (only when cheater was notified)
+            # auto-fire in win mode
             if cheat_mode and cheater and cheater._seeded:
                 coord = cheater.next_shot()
                 if coord is None:
-                    # not ready or out of targets
                     if not cheater._turn_ready:
                         continue
                     print("[INFO] All ships fired, exiting cheat-client.")
                     break
                 wfile.write(f"FIRE {coord}\n")
                 wfile.flush()
-                _prompt_shown = False
                 continue
 
-            # normal prompt…
-            if not _prompt_shown:
-                _prompt()
-                _prompt_shown = True
-
-            import sys
-            import select
-
-            ready, _, _ = select.select([sys.stdin], [], [], 0.5)
-            if not ready:
+            # fetch user input with timeout
+            try:
+                user_input = input_queue.get(timeout=0.5)
+            except queue.Empty:
                 continue
-            user_input = sys.stdin.readline().rstrip("\n")
-            _prompt_shown = False
-            if not user_input:
+            if user_input is None:
+                # EOF on input()
+                break
+            if not user_input.strip():
                 continue
-            # allow clean exit while waiting in lobby
+            # allow clean exit
             if user_input.upper() == "QUIT":
                 print("[INFO] Exiting client per user request.")
                 break
-            # map slash-chat (any case) to CHAT for the protocol
+            # map slash-chat to CHAT
             parts = user_input.strip().split(" ", 1)
             if parts[0].lower() == "/chat" and len(parts) > 1:
                 user_input = f"CHAT {parts[1]}"

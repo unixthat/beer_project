@@ -168,6 +168,9 @@ class GameSession(threading.Thread):
         # Notify players of new match and tokens
         self._notify(self.p1_file_w, "INFO New game: you are Player 1")
         self._notify(self.p2_file_w, "INFO New game: you are Player 2")
+        # Inform both players of their opponent's PID-token
+        self._notify(self.p1_file_w, f"INFO You are now playing a new match against {self.token_p2}")
+        self._notify(self.p2_file_w, f"INFO You are now playing a new match against {self.token_p1}")
         # Legacy START frames for compatibility
         self._notify(self.p1_file_w, f"START you {self.token_p1}")
         self._notify(self.p2_file_w, f"START opp {self.token_p2}")
@@ -447,6 +450,9 @@ class GameSession(threading.Thread):
         shots = self._shots.get(winner, 0)
         self._notify(win_w, f"YOU HAVE WON WITH {shots} SHOTS")
         self._notify(lose_w, f"YOU HAVE LOST – opponent won with {shots} shots")
+        # If this was a concession, explicitly notify winner of opponent's forfeiture
+        if reason == "concession":
+            self._notify(win_w, "INFO Opponent has forfeited – match over")
 
         # Record result for server logs
         self.winner = winner
