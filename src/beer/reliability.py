@@ -1,7 +1,9 @@
 # Reliability abstraction module
 
+
 class RetransmissionBuffer:
     """Buffer sent frames for possible retransmission on NAK"""
+
     def __init__(self, buffer_size: int = 64):
         self.buffer_size = buffer_size
         self.buffer = {}

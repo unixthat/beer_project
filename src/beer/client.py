@@ -134,6 +134,9 @@ def _recv_loop(
     """Continuously print messages from the server (framed packets only)."""
     global TOKEN
     br = sock.makefile("rb")  # buffered reader
+    # Attach writer for reliability (ACK/NAK control)
+    bw = sock.makefile("wb")  # binary writer for reliability frames
+    setattr(br, "_writer", bw)
     # Track which player slot we're in (1=you, 2=opponent)
     my_slot: int | None = None
 

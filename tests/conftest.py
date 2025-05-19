@@ -5,9 +5,17 @@ from beer.session import GameSession
 from beer.server import PID_REGISTRY
 from beer.common import recv_pkt
 import logging
+import beer.common as common
 
 # Suppress INFO & DEBUG logs from server threads during tests
 logging.basicConfig(level=logging.WARNING)
+
+# Reset encryption flag for every test
+@pytest.fixture(autouse=True)
+def reset_encryption() -> None:
+    common.disable_encryption()
+    yield
+    common.disable_encryption()
 
 
 class TestClient:

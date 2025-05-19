@@ -1,7 +1,9 @@
 # replay protection abstraction module
 
+
 class ReplayWindow:
     """Track received sequence numbers to prevent replay and allow limited out-of-order"""
+
     def __init__(self, window_size: int = 64):
         self.window_size = window_size
         self.highest_seq = -1

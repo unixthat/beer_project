@@ -5,6 +5,7 @@ from .battleship import SHIP_LETTERS
 # Ship letters defined in battleship.SHIP_LETTERS
 _SHIP_CHARS = set(SHIP_LETTERS.values())
 
+
 # Only treat a grid as a "reveal" if it actually shows ships
 def _is_reveal_grid(rows: list[str]) -> bool:
     """Return True if rows contain any ship letter."""

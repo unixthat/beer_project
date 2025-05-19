@@ -28,10 +28,21 @@ _rekey_priv_key = None
 # Public rekey ephemeral bytes to send when appropriate
 _rekey_pub: bytes | None = None
 
+
 def enable_encryption(key: bytes) -> None:
     """Set the symmetric encryption key for AEAD operations"""
     global _secret_key
     _secret_key = key
+    # Sync key state with common framing module
+    try:
+        import importlib
+
+        common_mod = importlib.import_module(__package__ + ".common")
+        common_mod.enable_encryption(key)
+    except Exception:
+        # If common module is unavailable, skip syncing
+        pass
+
 
 def complete_rekey(peer_public_bytes: bytes) -> None:
     """Complete a rekey handshake: derive new session key and enable encryption."""
@@ -51,6 +62,7 @@ def complete_rekey(peer_public_bytes: bytes) -> None:
     global _rekey_pub
     _rekey_pub = None
 
+
 def maybe_rekey() -> bytes | None:
     """Check thresholds and generate a fresh ECDH key pair for rekey if needed."""
     global _pkt_count, _last_rekey_time, _rekey_priv_key
@@ -67,6 +79,7 @@ def maybe_rekey() -> bytes | None:
         _last_rekey_time = now
         return pub
     return None
+
 
 def pack(ptype: int, seq: int, payload: bytes) -> bytes:
     """AEAD pack: header + ciphertext+tag"""
@@ -88,6 +101,7 @@ def pack(ptype: int, seq: int, payload: bytes) -> bytes:
     # TODO: if pub is not None, caller should send a REKEY packet containing this public key
     return header + ciphertext
 
+
 def unpack(frame: bytes) -> tuple[int, int, int, int, bytes]:
     """AEAD unpack: returns (magic, version, ptype, seq, plaintext)"""
     if _secret_key is None:
@@ -95,10 +109,11 @@ def unpack(frame: bytes) -> tuple[int, int, int, int, bytes]:
     header_size = HEADER_STRUCT.size
     hdr = frame[:header_size]
     magic, version, ptype, seq, nonce, length = HEADER_STRUCT.unpack(hdr)
-    ciphertext = frame[header_size:header_size+length]
+    ciphertext = frame[header_size : header_size + length]
     aesgcm = AESGCM(_secret_key)
     plaintext = aesgcm.decrypt(nonce, ciphertext, None)
     return magic, version, ptype, seq, plaintext
+
 
 def get_rekey_pub() -> bytes | None:
     """Return pending rekey public bytes (or None if none)."""

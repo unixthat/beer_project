@@ -50,6 +50,12 @@ def enable_encryption(key: bytes) -> None:
     _SECRET_KEY = key
 
 
+def disable_encryption() -> None:
+    """Disable AEAD encryption, reverting to legacy CRC framing."""
+    global _SECRET_KEY
+    _SECRET_KEY = None
+
+
 class PacketType(int, enum.Enum):
     """Enumerate BEER wire-protocol packet categories."""
 
@@ -85,64 +91,47 @@ def _crc32(data: bytes) -> int:
 
 def pack(*args) -> bytes:
     """Serialize a BEER packet.
-    Under secure mode (encryption enabled), use AEAD for all payloads.
-    Legacy CRC framing only when encryption is disabled and payload is not raw bytes.
-    Supports signatures:
-      pack({'ptype', 'seq', 'obj'}) or pack(ptype, seq, obj).
-    """
-    # Dict signature: supports raw-bytes under 'obj' or full dict JSON
+    Under secure mode (AES key set), use AEAD framing for all payloads.
+    Otherwise use legacy JSON+CRC framing."""
+    # Support dict signature or explicit args
     if len(args) == 1 and isinstance(args[0], dict):
         pkt = args[0]
         ptype_val = int(pkt['ptype'])
         seq = pkt['seq']
         obj = pkt['obj']
-        # Raw bytes payload always AEAD
-        if isinstance(obj, (bytes, bytearray)):
-            return aead_pack(ptype_val, seq, obj)
-        # Otherwise JSON encode full dict
-        payload = json.dumps(pkt).encode()
-        # Secure mode: AEAD framing
-        if _SECRET_KEY is not None:
-            return aead_pack(ptype_val, seq, payload)
-        # Legacy JSON+CRC framing
-        header = struct.pack(
-            ">HBBII", MAGIC, VERSION, ptype_val, seq, len(payload)
-        )
-        crc = _crc32(header + payload)
-        return header + struct.pack(
-            ">I", crc
-        ) + payload
     elif len(args) == 3:
         ptype_val = int(args[0])
         seq = args[1]
         obj = args[2]
-        # Raw bytes payload always AEAD
-        if isinstance(obj, (bytes, bytearray)):
-            return aead_pack(ptype_val, seq, obj)
-        # JSON payload
-        payload = json.dumps(obj).encode()
-        # Secure mode: AEAD framing
-        if _SECRET_KEY is not None:
-            return aead_pack(ptype_val, seq, payload)
-        # Legacy JSON+CRC framing
-        header = struct.pack(
-            ">HBBII", MAGIC, VERSION, ptype_val, seq, len(payload)
-        )
-        crc = _crc32(header + payload)
-        return header + struct.pack(
-            ">I", crc
-        ) + payload
     else:
         raise TypeError(f"Invalid pack signature: {args}")
+    # Raw bytes always AEAD
+    if isinstance(obj, (bytes, bytearray)):
+        return aead_pack(ptype_val, seq, obj)
+    # JSON payload
+    payload = json.dumps(obj).encode()
+    # Secure mode: AEAD framing
+    if _SECRET_KEY is not None:
+        return aead_pack(ptype_val, seq, payload)
+    # Legacy JSON+CRC framing
+    header = struct.pack(
+        ">HBBII", MAGIC, VERSION, ptype_val, seq, len(payload)
+    )
+    crc = _crc32(header + payload)
+    return header + struct.pack(
+        ">I", crc
+    ) + payload
 
 
 def unpack(buf: bytes | BufferedReader) -> Tuple[PacketType, int, Any]:
-    """Read one framed packet and return (ptype, seq, obj)."""
-    # AEAD framing for raw-bytes input (always use AEAD for raw frames)
+    """Read one framed packet and return (ptype, seq, obj).
+    Under secure mode (AES key set), use AEAD framing; otherwise use legacy JSON+CRC framing."""
     from io import BytesIO
+    from cryptography.exceptions import InvalidTag
+
+    # AEAD framing for raw-bytes input (always AEAD)
     if isinstance(buf, (bytes, bytearray)):
         reader = BytesIO(buf)
-        # Read AEAD header
         header_len = AEAD_HEADER_STRUCT.size
         header_bytes = reader.read(header_len)
         if len(header_bytes) < header_len:
@@ -152,17 +141,19 @@ def unpack(buf: bytes | BufferedReader) -> Tuple[PacketType, int, Any]:
         if len(ciphertext) < length:
             raise IncompleteError("Incomplete payload")
         frame = header_bytes + ciphertext
-        # Decrypt and unpack
-        magic2, version2, ptype2f, seq2f, plaintext = aead_unpack(frame)
+        try:
+            magic2, version2, ptype2f, seq2f, plaintext = aead_unpack(frame)
+        except InvalidTag:
+            raise FrameError("AEAD authentication failed")
         if magic2 != MAGIC or version2 != VERSION:
             raise FrameError("magic/version mismatch")
-        # Wrap raw plaintext in a packet dict
-        pkt = {'obj': plaintext}
-        return pkt, PacketType(ptype2f), seq2f
-    # File-like input: choose AEAD or CRC based on encryption flag
+        # Return raw payload wrapped in dict
+        return {'obj': plaintext}, PacketType(ptype2f), seq2f
+
+    # File-like input: choose AEAD or CRC based on key state
     reader = buf
+    # AEAD framing for file-like input when encryption enabled
     if _SECRET_KEY is not None:
-        # AEAD framing
         header_len = AEAD_HEADER_STRUCT.size
         header_bytes = reader.read(header_len)
         if len(header_bytes) < header_len:
@@ -172,7 +163,10 @@ def unpack(buf: bytes | BufferedReader) -> Tuple[PacketType, int, Any]:
         if len(ciphertext) < length:
             raise IncompleteError("Incomplete payload")
         frame = header_bytes + ciphertext
-        magic2, version2, ptype2f, seq2f, plaintext = aead_unpack(frame)
+        try:
+            magic2, version2, ptype2f, seq2f, plaintext = aead_unpack(frame)
+        except InvalidTag:
+            raise FrameError("AEAD authentication failed")
         if magic2 != MAGIC or version2 != VERSION:
             raise FrameError("magic/version mismatch")
         try:
@@ -180,6 +174,7 @@ def unpack(buf: bytes | BufferedReader) -> Tuple[PacketType, int, Any]:
         except Exception:
             obj = plaintext
         return PacketType(ptype2f), seq2f, obj
+
     # Legacy JSON+CRC framing
     if not hasattr(reader, "_replay_window"):
         reader._replay_window = ReplayWindow()
@@ -215,7 +210,7 @@ def unpack(buf: bytes | BufferedReader) -> Tuple[PacketType, int, Any]:
 def send_pkt(w: BufferedWriter, ptype: PacketType, seq: int, obj: Any) -> None:
     """Write a single framed packet to buffered writer *w* and flush."""
     frame = pack(ptype, seq, obj)
-    if not hasattr(w, '_retrans_buffer'):
+    if not hasattr(w, "_retrans_buffer"):
         w._retrans_buffer = RetransmissionBuffer()
     w._retrans_buffer.add(seq, frame)
     w.write(frame)
@@ -228,11 +223,12 @@ def recv_pkt(r: BufferedReader) -> Tuple[PacketType, int, Any]:
     if not hasattr(r, "_replay_window"):
         r._replay_window = ReplayWindow()
     # Attach writer if provided (for NAK/ACK responses)
-    writer = getattr(r, '_writer', None)
+    writer = getattr(r, "_writer", None)
     # AEAD framing when encryption enabled
     if _SECRET_KEY is not None:
         from .encryption import complete_rekey
         from cryptography.exceptions import InvalidTag
+
         while True:
             # Read AEAD header
             header_len = AEAD_HEADER_STRUCT.size
@@ -240,14 +236,15 @@ def recv_pkt(r: BufferedReader) -> Tuple[PacketType, int, Any]:
             if len(header) < header_len:
                 raise IncompleteError("Incomplete header")
             magic, version, ptype_val, seq, nonce, length = AEAD_HEADER_STRUCT.unpack(header)
-            cipher = r.read(length)
-            if len(cipher) < length:
+            # Read ciphertext+tag
+            ciphertext = r.read(length)
+            if len(ciphertext) < length:
                 raise IncompleteError("Incomplete payload")
-            frame = header + cipher
+            frame = header + ciphertext
             try:
                 magic2, version2, ptype2, seq2, plaintext = aead_unpack(frame)
             except InvalidTag:
-                # authentication failure: request retransmission
+                # Authentication failure: request retransmission
                 if writer is not None:
                     send_pkt(writer, PacketType.NAK, seq, None)
                 continue
@@ -276,14 +273,10 @@ def recv_pkt(r: BufferedReader) -> Tuple[PacketType, int, Any]:
         header_bytes = r.read(HEADER_LEN)
         if len(header_bytes) < HEADER_LEN:
             raise IncompleteError("Incomplete header")
-        magic, version, ptype_byte, seq, length = struct.unpack(
-            ">HBBII", header_bytes[:12]
-        )
+        magic, version, ptype_byte, seq, length = struct.unpack(">HBBII", header_bytes[:12])
         if magic != MAGIC or version != VERSION:
             raise FrameError("magic/version mismatch")
-        crc_expected = struct.unpack(
-            ">I", header_bytes[12:16]
-        )[0]
+        crc_expected = struct.unpack(">I", header_bytes[12:16])[0]
         payload = r.read(length)
         if len(payload) < length:
             raise IncompleteError("Incomplete payload")
@@ -308,6 +301,7 @@ def recv_pkt(r: BufferedReader) -> Tuple[PacketType, int, Any]:
 __all__ = [
     "PacketType",
     "enable_encryption",
+    "disable_encryption",
     "pack",
     "unpack",
     "send_pkt",

@@ -125,6 +125,7 @@ class GameSession(threading.Thread):
             self.io_seq += 1
             # Rekey handshake if pending
             from .encryption import get_rekey_pub
+
             pub = get_rekey_pub()
             if pub is not None:
                 # Send REKEY packet with our new public key
@@ -139,6 +140,7 @@ class GameSession(threading.Thread):
 
         # Initialize reconnect controller (registers both tokens)
         from .server import PID_REGISTRY
+
         self.recon = ReconnectController(
             TURN_TIMEOUT,
             self._notify_player,
