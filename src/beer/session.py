@@ -43,17 +43,17 @@ from typing import TextIO, Any, Callable, List
 import logging
 
 from .battleship import Board, SHIPS, parse_coordinate, SHIP_LETTERS
-from .common import PacketType
+from .common import PacketType, unpack, handle_control_frame
 from .io_utils import (
     send as io_send,
     send_grid,
     send_opp_grid,
-    safe_readline,
     chat_broadcast,
-    recv_turn,
+    recv_cmd,
     refresh_views,
     grid_rows,
 )
+from .commands import parse_command, ChatCommand, FireCommand, QuitCommand, CommandParseError
 from .reconnect_controller import ReconnectController
 from .placement_wizard import run as place_ships
 from . import config as _cfg
@@ -171,46 +171,14 @@ class GameSession(threading.Thread):
         # Inform both players of their opponent's PID-token
         self._notify(self.p1_file_w, f"INFO You are now playing a new match against {self.token_p2}")
         self._notify(self.p2_file_w, f"INFO You are now playing a new match against {self.token_p1}")
+
         # Legacy START frames for compatibility
         self._notify(self.p1_file_w, f"START you {self.token_p1}")
         self._notify(self.p2_file_w, f"START opp {self.token_p2}")
 
-        # Manual placement via interactive wizard
-        # prepare safe_read callback with rebind for Player 1
-        def _safe_read_1(_: TextIO) -> str:
-            line = safe_readline(self.p1_file_r, lambda: self.recon.wait(1))
-            if not line:
-                self._rebind_if_needed(1)
-                line = safe_readline(self.p1_file_r, lambda: self.recon.wait(1))
-            return line
-
-        # Player 1 placement
-        if not place_ships(
-            self.board_p1,
-            self.p1_file_r,
-            self.p1_file_w,
-            _safe_read_1,
-        ):
-            self.drop_and_deregister(1, reason="disconnect during placement")
-            return
-
-        # prepare safe_read callback with rebind for Player 2
-        def _safe_read_2(_: TextIO) -> str:
-            line = safe_readline(self.p2_file_r, lambda: self.recon.wait(2))
-            if not line:
-                self._rebind_if_needed(2)
-                line = safe_readline(self.p2_file_r, lambda: self.recon.wait(2))
-            return line
-
-        # Player 2 placement
-        if not place_ships(
-            self.board_p2,
-            self.p2_file_r,
-            self.p2_file_w,
-            _safe_read_2,
-        ):
-            self.drop_and_deregister(2, reason="disconnect during placement")
-            return
+        # Skip manual placement: randomly place ships for both players
+        self.board_p1.place_ships_randomly()
+        self.board_p2.place_ships_randomly()
 
         # Initial own-fleet reveal and opponent views for both players
         ok1, ok2, self.io_seq = refresh_views(
@@ -238,121 +206,91 @@ class GameSession(threading.Thread):
     def run(self) -> None:  # noqa: C901 complexity – fine for server thread
         """Main game-loop executed in its own thread until the match ends."""
         try:
-            # Start the first match handshake
+            # Handshake and placement
             self._begin_match()
             current_player = 1
             self.current = current_player
 
             while True:
-                # Poll both sockets for real disconnect before each turn
-                dropped_slots: list[int] = []
-                for idx in (1, 2):
-                    r, _ = self._file_pair(idx)
-                    sock = r.buffer.raw._sock
-                    # Peek for EOF only (do not consume any data)
-                    if self._is_eof(sock):
-                        logging.info(f"EOF on player {idx}'s socket detected")
-                        dropped_slots.append(idx)
-                if dropped_slots:
-                    logging.info(f"Disconnected slots detected: {dropped_slots}")
-                    if self._handle_disconnects(dropped_slots):
-                        return
-                    continue
-                # Process buffered lines if any
-                self._line_buffer.clear()
-
-                attacker_r, attacker_w, defender_board, defender_name = self._select_players(current_player)
-                # Identify defender streams for out-of-turn monitoring
-                defender_idx = 2 if current_player == 1 else 1
-                defender_r, defender_w = self._file_pair(defender_idx)
-
-                # Request coordinate—always prompt exactly once here
+                # Send turn prompt
                 self._prompt_current_player()
                 self._emit(Event(Category.TURN, "prompt", {"player": current_player}))
 
-                coord = recv_turn(self, attacker_r, attacker_w, defender_r, defender_w)
-                logging.debug(f"recv_turn returned: {coord!r}")
-                if coord == "ATTACKER_LEFT":
-                    logging.info(f"Attacker {current_player} left mid-turn")
-                    # attacker dropped mid-turn → try reconnect
-                    if self.recon.wait(current_player):
-                        new_sock = self.recon.take_new_socket(current_player)
-                        self._rebind_slot(current_player, new_sock)
-                        continue
-                    # failed to reattach → concession
-                    self.drop_and_deregister(current_player, reason="timeout")
-                    return
-                elif coord is None:
-                    # genuine timeout/no-EOF case → concession
-                    logging.info(f"Player {current_player} timed out – ending match")
-                    self.drop_and_deregister(current_player, reason="timeout")
-                    return
+                # Receive next framed command, handling disconnects
+                reader = self.p1_file_r.buffer if current_player == 1 else self.p2_file_r.buffer
+                try:
+                    cmd_line = recv_cmd(reader)
+                except Exception:
+                    # Attempt to handle disconnect and possible reconnect
+                    if self._handle_disconnects([current_player]):
+                        return
+                    # Resume loop after successful reconnect
+                    continue
+                try:
+                    cmd = parse_command(cmd_line)
+                except CommandParseError as e:
+                    # Invalid command: notify and re-prompt
+                    w = self.p1_file_w if current_player == 1 else self.p2_file_w
+                    self._notify(w, f"ERR {e}")
+                    continue
 
-                if coord == "QUIT":
-                    # Player conceded mid-turn → end session
+                # Handle Quit
+                if isinstance(cmd, QuitCommand):
                     logging.info(f"Player {current_player} conceded – ending match")
                     self.drop_and_deregister(current_player, reason="concession")
                     return
 
-                row, col = coord  # tuple[int, int]
+                # Handle Chat
+                if isinstance(cmd, ChatCommand):
+                    payload = {"name": f"P{current_player}", "msg": cmd.text}
+                    # Send chat to both players
+                    self.io_seq = chat_broadcast(
+                        [self.p1_file_w, self.p2_file_w],
+                        self.io_seq,
+                        current_player,
+                        cmd.text,
+                        payload,
+                    )
+                    # Also deliver to spectators
+                    self._broadcast(payload, PacketType.CHAT)
+                    # Emit event for routing
+                    self._emit(Event(Category.CHAT, "line", {"player": current_player, "msg": cmd.text}))
+                    continue
+
+                # Handle Fire
+                row, col = cmd.row, cmd.col
                 # Prevent duplicate shots: check if this player already fired here
                 key = (row, col)
-                logging.debug(f"Broadcasting shot for P{self.current}: {(row, col)}")
-
                 if key in self._fired[current_player]:
-                    # Prevent duplicate shots: prompt error
-                    self._notify(attacker_w, f"ERR Already fired at {format_coord(row, col)}, choose another")
-                    continue  # re-prompt same player
+                    w = self.p1_file_w if current_player == 1 else self.p2_file_w
+                    self._notify(w, f"ERR Already fired at {format_coord(row, col)}, choose another")
+                    continue
                 self._fired[current_player].add(key)
-
-                # Peek ship letter before firing to identify which ship was hit (server console only)
-                orig_cell = defender_board.hidden_grid[row][col]
+                # Resolve shot
+                defender_board = self.board_p2 if current_player == 1 else self.board_p1
+                defender_w = self.p2_file_w if current_player == 1 else self.p1_file_w
+                attacker_w = self.p1_file_w if current_player == 1 else self.p2_file_w
                 result, sunk_name = defender_board.fire_at(row, col)
                 coord_txt = format_coord(row, col)
-
-                # --- Human-friendly descriptive messages (single source of truth for clients/bots) ---
+                # Build messages
                 if result == "hit":
                     attacker_msg = f"YOU HIT at {coord_txt}"
                     defender_msg = f"OPPONENT HIT your ship at {coord_txt}"
-                    if sunk_name:
-                        attacker_msg = f"YOU SUNK opponent's {sunk_name} at {coord_txt}"
-                        defender_msg = f"OPPONENT SUNK your {sunk_name} at {coord_txt}"
-                else:  # miss
+                else:
                     attacker_msg = f"YOU MISSED at {coord_txt}"
                     defender_msg = f"OPPONENT MISSED at {coord_txt}"
-
-                io_send(attacker_w, self.io_seq, msg=attacker_msg)
+                # Send feedback
+                io_send(attacker_w, self.io_seq, PacketType.GAME, msg=attacker_msg)
                 self.io_seq += 1
-                io_send(defender_w, self.io_seq, msg=defender_msg)
+                io_send(defender_w, self.io_seq, PacketType.GAME, msg=defender_msg)
                 self.io_seq += 1
-                # Broadcast per-shot messages to all waiting clients
-                self._broadcast(attacker_msg, None)
-                self._broadcast(defender_msg, None)
+                # Event routing
+                self._broadcast(
+                    {"player": current_player, "coord": coord_txt, "result": result, "sunk": sunk_name},
+                    PacketType.GAME,
+                )
 
-                # Count valid shot (hit or miss)
-                if result in {"hit", "miss"}:
-                    self._shots[current_player] += 1
-
-                    # Emit structured shot event for server routing
-                    self._emit(
-                        Event(
-                            Category.TURN,
-                            "shot",
-                            {
-                                "attacker": current_player,
-                                "coord": coord_txt,
-                                "result": result,
-                                "sunk": sunk_name or "",
-                            },
-                        )
-                    )
-
-                # Check game-over
-                if defender_board.all_ships_sunk():
-                    self._conclude(current_player, reason="fleet destroyed")
-                    return
-
-                # After each turn, refresh both players' boards
+                # Send updated boards to both players
                 ok1, ok2, self.io_seq = refresh_views(
                     self.p1_file_w,
                     self.p2_file_w,
@@ -360,21 +298,13 @@ class GameSession(threading.Thread):
                     self.board_p1,
                     self.board_p2,
                 )
-                # If active player's grid write fails, treat as timeout/disconnect;
-                # ignore failures sending to the opponent to avoid premature match end.
-                if not ok1:
-                    winner = 2
-                    self._conclude(winner, reason="timeout/disconnect")
+
+                # Game over
+                if defender_board.all_ships_sunk():
+                    self._conclude(current_player, reason="fleet destroyed")
                     return
 
-                # After every *two* half-turns broadcast a fresh dual-board to spectators
-                self._half_turn_counter += 1
-                if self._half_turn_counter % 2 == 0:
-                    rows_p1 = grid_rows(self.board_p1, reveal=True)
-                    rows_p2 = grid_rows(self.board_p2, reveal=True)
-                    self._broadcast(None, {"type": "spec_grid", "rows_p1": rows_p1, "rows_p2": rows_p2})
-
-                # Next player's turn
+                # Next turn
                 current_player = 2 if current_player == 1 else 1
                 self.current = current_player
         finally:
@@ -561,6 +491,18 @@ class GameSession(threading.Thread):
         """
         w = self.p1_file_w if self.current == 1 else self.p2_file_w
         self._notify(w, "INFO YOUR TURN – FIRE <coord> or QUIT")
+
+    # ------------------------------------------------------------
+    def _control_loop(self, ctrl_reader, data_writer_buf):  # binary reader, BufferedWriter
+        """Loop reading ACK/NAK control frames and invoke retransmit/prune."""
+        from .common import PacketType
+        while True:
+            try:
+                ptype, seq, obj = unpack(ctrl_reader)
+            except Exception:
+                break
+            if ptype in (PacketType.ACK, PacketType.NAK):
+                handle_control_frame(data_writer_buf, ptype, seq)
 
 
 # End of GameSession module

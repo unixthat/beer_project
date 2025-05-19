@@ -249,11 +249,16 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
                 # Accept new connection (blocking)
                 conn, addr = server_sock.accept()
                 print(f"[INFO] Client connected from {addr}")
-                # ---------------- reconnect handshake ----------------
+                # Read the "TOKEN ..." line byte-by-byte so we don't over-buffer and kill our framing
                 conn.settimeout(_cfg.RECONNECT_HANDSHAKE_TIMEOUT)
-                rfile = conn.makefile("r")
+                first_line_bytes = bytearray()
                 try:
-                    first_line = rfile.readline(64).strip()
+                    while len(first_line_bytes) < 64:
+                        ch = conn.recv(1)
+                        if not ch or ch == b"\n":
+                            break
+                        first_line_bytes.extend(ch)
+                    first_line = first_line_bytes.decode(errors="ignore").strip()
                 except Exception:
                     first_line = ""
                 finally:

@@ -1,5 +1,6 @@
 import socket
 from beer.io_utils import send
+from beer.common import PacketType
 from conftest import TestClient
 
 # prevent pytest from treating this helper as a test class
@@ -15,9 +16,9 @@ def test_chat_visible_to_spectator(game_factory):
     spec_srv, spec_cli = socket.socketpair()
     spec = TestClient(spec_cli)
 
-    # Override the session's broadcast → send any msg/obj to spectator
-    sess._broadcast = lambda msg, obj=None: send(
-        spec_srv.makefile("w"), 0, msg=msg, obj=obj
+    # Override the session's broadcast to send CHAT frames to spectator
+    sess._broadcast = lambda payload, obj=None: send(
+        spec_srv.makefile("w"), 0, PacketType.CHAT, obj=payload
     )
 
     # 1) Player 1 → delivered to Player 2 and Spectator

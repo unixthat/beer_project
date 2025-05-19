@@ -17,8 +17,8 @@ import queue
 from .common import (
     PacketType,
     FrameError,
-    CrcError,
     IncompleteError,
+    CrcError,
     recv_pkt,
     send_pkt,
     enable_encryption,
@@ -27,6 +27,7 @@ from .common import (
 from .battleship import SHIP_LETTERS
 from . import config as _cfg
 from .cheater import Cheater
+from .io_utils import send as io_send
 
 HOST = _cfg.DEFAULT_HOST
 PORT = _cfg.DEFAULT_PORT
@@ -38,7 +39,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ------------------- PID-token handshake token -------------------
-# Handshake token: default to the parent shell's PID for reconnect persistence, overrideable by BEER_TOKEN env var
+# Handshake token: default to the parent (shell) PID so it stays constant per terminal
 TOKEN = os.getenv("BEER_TOKEN", f"PID{os.getppid()}")
 # Inform user of the token in use
 print(f"[INFO] Using handshake TOKEN='{TOKEN}'")
@@ -409,11 +410,15 @@ def _client(s, args, cheat_mode: bool = False):
             input_queue.put(line)
     threading.Thread(target=_input_thread, daemon=True).start()
 
+    # Set up framed writer and sequence counter
     wfile = s.makefile("w")
+    client_seq = 0
 
     try:
         while True:
             if stop_evt.is_set():
+                # Ensure a clear newline so the shell prompt appears correctly
+                print()
                 print("[INFO] Disconnected from server. Exiting client.")
                 break
 
@@ -425,30 +430,27 @@ def _client(s, args, cheat_mode: bool = False):
                         continue
                     print("[INFO] All ships fired, exiting cheat-client.")
                     break
-                wfile.write(f"FIRE {coord}\n")
-                wfile.flush()
+                # Send framed FIRE command
+                io_send(wfile, client_seq, PacketType.GAME, msg=f"FIRE {coord}")
+                client_seq += 1
                 continue
 
-            # fetch user input with timeout
+            # fetch user input
             try:
                 user_input = input_queue.get(timeout=0.5)
             except queue.Empty:
                 continue
             if user_input is None:
-                # EOF on input()
                 break
-            if not user_input.strip():
+            text = user_input.strip()
+            if not text:
                 continue
-            # allow clean exit
-            if user_input.upper() == "QUIT":
+            if text.upper() == "QUIT":
                 print("[INFO] Exiting client per user request.")
                 break
-            # map slash-chat to CHAT
-            parts = user_input.strip().split(" ", 1)
-            if parts[0].lower() == "/chat" and len(parts) > 1:
-                user_input = f"CHAT {parts[1]}"
-            wfile.write(user_input + "\n")
-            wfile.flush()
+            # Send framed command
+            io_send(wfile, client_seq, PacketType.GAME, msg=text)
+            client_seq += 1
     except KeyboardInterrupt:
         print("\n[INFO] Client exiting.")
     finally:

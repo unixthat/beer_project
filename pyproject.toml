@@ -39,3 +39,11 @@ warn_unused_ignores = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+# Configure setuptools to find packages under src/
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["beer*"]
+
+[tool.setuptools.package-dir]
+"" = "src"

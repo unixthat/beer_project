@@ -1,6 +1,6 @@
 # io_utils.py
 """
-Low-level helpers shared by GameSession and its sub-modules
+Low-level helpers shared by GameSession and its sub-modules (cleaned up)
 –––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
 • send()          – frame + flush arbitrary payloads
 • send_grid()     – convenience wrapper for Board → grid packet
@@ -8,20 +8,21 @@ Low-level helpers shared by GameSession and its sub-modules
 • grid_rows()     – Board → ["A1 A2 …", …] helper (ships optionally revealed)
 """
 
+import socket
 from typing import Any, TextIO, Callable, List, Tuple
 from .config import TURN_TIMEOUT
-from .common import PacketType, send_pkt
+from .common import PacketType, send_pkt, unpack
 from .battleship import Board
 from .commands import parse_command, ChatCommand, FireCommand, QuitCommand, CommandParseError
-import socket
+from io import BufferedReader
 
 
 def send(
     w: TextIO, seq: int, ptype: PacketType = PacketType.GAME, *, msg: str | None = None, obj: Any | None = None
 ) -> bool:
-    # Debug print of send parameters
-    print(f"[DBG send] seq={seq} msg={msg} obj={obj}")
+    """Frame + flush a GAME/CHAT/etc. packet over *w*."""
     payload = obj if obj is not None else {"msg": msg}
+
     # Attempt to detect EOF on underlying socket, if available
     sock = None
     try:
@@ -48,7 +49,6 @@ def send(
     try:
         send_pkt(w.buffer, ptype, seq, payload)  # type: ignore[arg-type]
         w.buffer.flush()
-        print(f"[DBG send] success seq={seq}")
         return True
     except (BrokenPipeError, ConnectionResetError):
         # peer closed or reset during send
@@ -59,23 +59,20 @@ def send(
 
 
 def grid_rows(board: Board, *, reveal: bool = False) -> List[str]:
-    print(f"[DBG grid_rows] reveal={reveal}")
     rows: list[str] = []
     for r in range(board.size):
         cell_row = [board.hidden_grid[r][c] if reveal else board.display_grid[r][c] for c in range(board.size)]
         rows.append(" ".join(cell_row))
-    print(f"[DBG grid_rows] rows_count={len(rows)}")
     return rows
 
 
 def send_grid(w: TextIO, seq: int, board: Board, *, reveal: bool = False) -> bool:
-    print(f"[DBG send_grid] seq={seq} reveal={reveal}")
+    """Send a GAME/frame with a `type=grid` payload."""
     return send(w, seq, PacketType.GAME, obj={"type": "grid", "rows": grid_rows(board, reveal=reveal)})
 
 
 def send_opp_grid(w: TextIO, seq: int, board: Board) -> bool:
-    """Reveal the _opponent_ ship map (hidden_grid) to a client."""
-    print(f"[DBG send_opp_grid] seq={seq} reveal_opponent")
+    """Reveal the opponent's ship map (hidden_grid)."""
     return send(
         w,
         seq,
@@ -90,24 +87,25 @@ def safe_readline(
 ) -> str:
     attempts = 0
     while True:
+        # Read a line, skipping any binary-decode errors
         try:
             line = reader.readline()
+        except UnicodeDecodeError:
+            # Skip corrupted bytes and retry
+            continue
         except (OSError, ConnectionResetError) as e:
             print(f"[DBG safe_readline] error {e}")
             line = ""
         if line:
-            print(f"[DBG safe_readline] got line {line!r}")
             return line
         if attempts == 0 and on_disconnect():
-            print(f"[DBG safe_readline] reconnect attempt")
             attempts += 1
             continue
-        print("[DBG safe_readline] returning empty line")
         return ""
 
 
 def chat_broadcast(writers: list[TextIO], seq: int, idx: int, chat_txt: str, payload: Any) -> int:
-    print(f"[DBG chat_broadcast] idx={idx} chat_txt={chat_txt}")
+    """Send CHAT frames to a list of writers."""
     for w in writers:
         send(w, seq, PacketType.CHAT, msg=f"[CHAT] P{idx}: {chat_txt}", obj=payload)
         seq += 1
@@ -150,12 +148,17 @@ def recv_turn(
             # Now there is actual data ready: read it
             try:
                 raw_line = file.readline()
-            except (OSError, ConnectionResetError):
+            except (OSError, ConnectionResetError, UnicodeDecodeError):
+                # Binary noise or socket error: skip line quietly
                 raw_line = ""
             if not raw_line:
-                # only attacker empties are left events; defender just falls through
+                # only attacker empties are left events if socket really closed
                 if sock is att_sock:
-                    return "ATTACKER_LEFT"
+                    try:
+                        if session._is_eof(sock):
+                            return "ATTACKER_LEFT"
+                    except Exception:
+                        return "ATTACKER_LEFT"
                 continue
 
             line = raw_line.strip()
@@ -217,7 +220,6 @@ def refresh_views(
     board1: Board,
     board2: Board,
 ) -> Tuple[bool, bool, int]:
-    print(f"[DBG refresh_views] seq={seq}")
     ok1 = send_grid(w1, seq, board1, reveal=True)
     seq += 1
     ok2 = send_grid(w2, seq, board2, reveal=True)
@@ -226,5 +228,21 @@ def refresh_views(
     seq += 1
     send_grid(w2, seq, board1)
     seq += 1
-    print(f"[DBG refresh_views] done seq={seq}")
     return ok1, ok2, seq
+
+
+def recv_pkt(r: BufferedReader) -> Tuple[PacketType, int, Any]:
+    """Blocking helper that returns the next `(ptype, seq, obj)` tuple from *r*."""
+    return unpack(r)
+
+
+def recv_cmd(r: BufferedReader) -> str:
+    """Read frames until a GAME frame arrives, then return its 'msg' payload."""
+    while True:
+        ptype, seq, obj = unpack(r)
+        if ptype == PacketType.GAME:
+            if isinstance(obj, dict) and 'msg' in obj:
+                return obj['msg']
+            break
+        # skip other frame types (CHAT, ACK, NAK, etc.)
+    return ""

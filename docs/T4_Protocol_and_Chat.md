@@ -45,10 +45,25 @@ This document summarizes our Tier 4.1–4.3 implementations: the in-game chat ch
 - **Checksum**
   - CRC-32 via `zlib.crc32(...)&0xFFFFFFFF`
   - Covers both header bytes 0–11 and the (optional encrypted) payload
-- **Error policy**
-  - On magic/version mismatch or CRC failure → `FrameError`/`CrcError` → disconnect
+- **Error policy & reliability**
+  - On magic/version mismatch or CRC failure → `CrcError(seq)` → receiver sends `NAK(seq)` and discards frame
+  - On successful frame → receiver sends `ACK(seq)` immediately
   - On premature close → `IncompleteError` → clean exit
-  - No retransmit or NAK; we choose fail-fast and rely on TCP reconnection logic
+
+### Reliability (ACK/NAK & Sliding Window)
+
+- **Control frames**: PacketType.ACK (2) and PacketType.NAK (3), zero-length JSON payloads carrying `seq`.
+- **Retransmit buffer**: `send_pkt` keeps a circular buffer of the last *W* = 32 raw frames per connection.
+- **Sender control loop**: background thread reading ACK/NAK from peer; on `ACK(seq)` prunes that entry, on `NAK(seq)` looks up and resends raw bytes.
+- **Receiver behavior**: after `unpack()`, send `ACK(seq)`; on CRC mismatch catch `CrcError` and send `NAK(seq)`.
+- **Window management**: discard buffer entries older than *W*; out-of-order or missing packets trigger NAK for that `seq`.
+
+### Error-Injection Tests
+
+In `tests/test_checksum_recovery.py`, we inject bit-flips into some frames at a controlled rate (e.g. 1%), then drive a client/server echo exchange:
+1. Count how many NAKs and retransmissions occur; ensure all data arrives in correct order.
+2. Verify that the observed CRC failures ≈ injection rate.
+3. Assert retransmissions ≤ *buffer_size*×error_rate.
 
 ────────────────────────────────────────────────────────
 

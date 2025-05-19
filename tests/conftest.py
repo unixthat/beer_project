@@ -3,7 +3,7 @@ import socket
 import threading
 from beer.session import GameSession
 from beer.server import PID_REGISTRY
-from beer.common import recv_pkt
+from beer.common import recv_pkt, pack, PacketType
 import logging
 
 # Suppress INFO & DEBUG logs from server threads during tests
@@ -17,8 +17,10 @@ class TestClient:
         self.sock = sock
 
     def send(self, msg: str) -> None:
-        """Send a message terminated by newline."""
-        self.sock.sendall(msg.encode())
+        """Send a framed GAME packet with the given message."""
+        # Frame the message as a GAME packet
+        data = pack(PacketType.GAME, 0, {"msg": msg.strip()})
+        self.sock.sendall(data)
 
     def recv_until(self, token: str, timeout: float = 2.0) -> str:
         """Read BEER protocol frames until the token appears in a decoded message."""
