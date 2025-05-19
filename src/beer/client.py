@@ -24,7 +24,7 @@ from .battleship import SHIP_LETTERS
 from . import config as _cfg
 from .cheater import Cheater
 from .common import send_pkt
-from .keyexchange import generate_key_pair, derive_session_key, client_hello, server_hello
+from .keyexchange import client_handshake
 from .encryption import enable_encryption
 from . import encryption as _encryption
 
@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 # Handshake token: default to the parent shell's PID for reconnect persistence, overrideable by BEER_TOKEN env var
 TOKEN = os.getenv("BEER_TOKEN", f"PID{os.getppid()}")
 # Inform user of the token in use
-print(f"[INFO] Using handshake TOKEN='{TOKEN}'")
+logger.info("Using handshake TOKEN=%s", TOKEN)
 
 # ---------------------------- receiver -----------------------------
 
@@ -127,15 +127,19 @@ _prompt_shown = False
 
 
 def _recv_loop(
-    sock: socket.socket, stop_evt: threading.Event, verbose: int, cheat_mode: bool, cheater: Cheater
+    sock: socket.socket,
+    stop_evt: threading.Event,
+    verbose: int,
+    cheat_mode: bool,
+    cheater: Cheater,
+    bw,  # shared binary writer for both reliability and game commands
 ) -> None:  # pragma: no cover
     global _prompt_shown
 
     """Continuously print messages from the server (framed packets only)."""
     global TOKEN
     br = sock.makefile("rb")  # buffered reader
-    # Attach writer for reliability (ACK/NAK control)
-    bw = sock.makefile("wb")  # binary writer for reliability frames
+    # Attach our shared writer for reliability (ACK/NAK control)
     setattr(br, "_writer", bw)
     # Track which player slot we're in (1=you, 2=opponent)
     my_slot: int | None = None
@@ -221,12 +225,15 @@ def _recv_loop(
     try:
         while True:
             try:
+                logger.debug("recv_pkt() – about to read packet from socket")
                 ptype, seq, obj = recv_pkt(br)  # type: ignore[arg-type]
+                logger.debug("recv_pkt() – received ptype=%s seq=%d obj=%r", ptype, seq, obj)
             except IncompleteError:
                 # Stream closed cleanly – exit receiver loop without warning.
                 stop_evt.set()
                 break
             except FrameError as exc:
+                logger.warning("recv_pkt() frame error: %s", exc)
                 if verbose >= 0:
                     print(f"[WARN] Frame error: {exc}.")
                 stop_evt.set()
@@ -290,6 +297,7 @@ def _recv_loop(
                 if verbose >= 1 and "raw" not in _cfg.QUIET_CATEGORIES:
                     print(obj)
     except Exception as exc:  # noqa: BLE001
+        logger.exception("Receiver thread crashed: %r", exc)
         if verbose >= 0:
             print(f"[ERROR] Receiver thread crashed: {exc!r}")
     finally:
@@ -344,7 +352,7 @@ def main() -> None:  # pragma: no cover – CLI entry
     if args.secure is not None:
         key = DEFAULT_KEY if args.secure == "default" else bytes.fromhex(args.secure)
         enable_encryption(key)
-        print("[INFO] Encryption enabled in client")
+        logger.info("Encryption enabled in client")
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         _client(s, args, cheat_mode=args.win)
@@ -362,15 +370,16 @@ def _client(s, args, cheat_mode: bool = False):
             # Always send PID handshake for initial join or reconnect
             try:
                 s.sendall(f"TOKEN {TOKEN}\n".encode())
+                logger.debug("Sending TOKEN handshake: %s", TOKEN)
             except Exception:
                 pass
-            print(f"[INFO] Connected to server at {addr}", flush=True)
+            logger.info("Connected to server at %s", addr)
             break
         except KeyboardInterrupt:
-            print("\n[INFO] Client exiting.")
+            logger.info("Client exiting")
             return
         except (ConnectionRefusedError, OSError):
-            print(f"[INFO] Server not ready at {addr}, retrying in 1s…", flush=True)
+            logger.info("Server not ready at %s, retrying in 1s…", addr)
             s.close()
             import socket as _socket
 
@@ -380,32 +389,31 @@ def _client(s, args, cheat_mode: bool = False):
 
             time.sleep(1)
         except KeyboardInterrupt:
-            print("\n[INFO] Client exiting.")
+            logger.info("Client exiting")
             return
 
     # Perform ECDH encryption handshake if no static key is set
     if _encryption._secret_key is None:
-        # Initiate handshake: client hello
-        c_pub, c_priv = client_hello()
-        s.sendall(f"HELLO {c_pub.hex()}\n".encode())
-        # Wait for server hello
-        data = s.recv(8192)
-        if data.startswith(b"HELLO "):
-            _, hex_pub = data.strip().split(b" ", 1)
-            server_pub = bytes.fromhex(hex_pub.decode())
-            session_key = derive_session_key(c_priv, server_pub)
-            enable_encryption(session_key)
+        client_handshake(s)
+        logger.debug("Completed client ECDH handshake and enabled encryption")
     stop_evt = threading.Event()
     cheater = Cheater() if cheat_mode else None
-    receiver = threading.Thread(target=_recv_loop, args=(s, stop_evt, _VERBOSE_LEVEL, cheat_mode, cheater), daemon=True)
+    # Single binary writer for both reliability (ACK/NAK) and user commands
+    wbuf = s.makefile("wb")
+    # Start the receiver thread with our shared writer
+    receiver = threading.Thread(
+        target=_recv_loop,
+        args=(s, stop_evt, _VERBOSE_LEVEL, cheat_mode, cheater, wbuf),
+        daemon=True,
+    )
     receiver.start()
-
-    wfile = s.makefile("w")
+    # Use wbuf to send all framed game commands
+    client_seq = 0
 
     try:
         while True:
             if stop_evt.is_set():
-                print("[INFO] Disconnected from server. Exiting client.")
+                logger.info("Disconnected from server. Exiting client.")
                 break
 
             # auto-fire in win mode (only when cheater was notified)
@@ -415,10 +423,15 @@ def _client(s, args, cheat_mode: bool = False):
                     # not ready or out of targets
                     if not cheater._turn_ready:
                         continue
-                    print("[INFO] All ships fired, exiting cheat-client.")
+                    logger.info("All ships fired, exiting cheat-client.")
                     break
-                wfile.write(f"FIRE {coord}\n")
-                wfile.flush()
+                # Debug: show auto-fire send
+                auto_cmd = f"FIRE {coord}"
+                logger.debug("client pre-auto-send – seq=%d cmd=%r", client_seq, auto_cmd)
+                send_pkt(wbuf, PacketType.GAME, client_seq, auto_cmd)
+                wbuf.flush()
+                logger.debug("client post-auto-send – seq=%d cmd=%r", client_seq, auto_cmd)
+                client_seq += 1
                 _prompt_shown = False
                 continue
 
@@ -427,9 +440,7 @@ def _client(s, args, cheat_mode: bool = False):
                 _prompt()
                 _prompt_shown = True
 
-            import sys
-            import select
-
+            import sys, select
             ready, _, _ = select.select([sys.stdin], [], [], 0.5)
             if not ready:
                 continue
@@ -437,18 +448,20 @@ def _client(s, args, cheat_mode: bool = False):
             _prompt_shown = False
             if not user_input:
                 continue
-            # allow clean exit while waiting in lobby
             if user_input.upper() == "QUIT":
-                print("[INFO] Exiting client per user request.")
+                logger.info("Exiting client per user request.")
                 break
-            # map slash-chat (any case) to CHAT for the protocol
             parts = user_input.strip().split(" ", 1)
             if parts[0].lower() == "/chat" and len(parts) > 1:
                 user_input = f"CHAT {parts[1]}"
-            wfile.write(user_input + "\n")
-            wfile.flush()
+            # Debug: show exactly what we're about to send
+            logger.debug("client pre-send – seq=%d cmd=%r", client_seq, user_input)
+            send_pkt(wbuf, PacketType.GAME, client_seq, user_input)
+            wbuf.flush()
+            logger.debug("client post-send – seq=%d cmd=%r", client_seq, user_input)
+            client_seq += 1
     except KeyboardInterrupt:
-        print("\n[INFO] Client exiting.")
+        logger.info("Client exiting")
     finally:
         stop_evt.set()
 

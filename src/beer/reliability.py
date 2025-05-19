@@ -19,3 +19,7 @@ class RetransmissionBuffer:
     def get(self, seq: int) -> bytes | None:
         """Retrieve a buffered frame by seq"""
         return self.buffer.get(seq)
+
+    def ack(self, seq: int) -> None:
+        """Acknowledge a frame"""
+        self.buffer.pop(seq, None)

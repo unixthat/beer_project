@@ -11,6 +11,8 @@ from beer.replay import ReplayWindow
 
 # Round-trip AEAD payload tests
 def test_roundtrip_payloads():
+    # enable AEAD for common.pack/unpack on JSON payloads
+    common.enable_encryption(common.DEFAULT_KEY)
     for size in [0, 16, 1024, 1024*1024 + 1]:
         payload = os.urandom(size)
         frame = aead_pack(PacketType.GAME.value, 42, payload)

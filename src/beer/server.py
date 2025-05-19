@@ -27,7 +27,6 @@ from .events import Event
 from .common import PacketType
 from .router import EventRouter
 from .io_utils import send as io_send
-from .keyexchange import generate_key_pair, derive_session_key, client_hello, server_hello
 from .encryption import enable_encryption
 from . import encryption as _encryption
 
@@ -256,16 +255,10 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
                         token_str = candidate
                 # Perform ECDH encryption handshake if no static key is set
                 if _encryption._secret_key is None:
-                    # Read client's HELLO with public key
-                    data = conn.recv(8192)
-                    if data.startswith(b"HELLO "):
-                        _, hex_pub = data.strip().split(b" ", 1)
-                        client_pub = bytes.fromhex(hex_pub.decode())
-                        # Generate server hello and derive session key
-                        server_pub, server_priv = server_hello(client_pub)
-                        conn.sendall(f"HELLO {server_pub.hex()}\n".encode())
-                        session_key = derive_session_key(server_priv, client_pub)
-                        enable_encryption(session_key)
+                    from .keyexchange import server_handshake
+
+                    server_handshake(conn)
+                    logger.debug("Completed server ECDH handshake and enabled encryption")
                 # Always treat new connections as waiting/spectating clients
                 lobby.append((conn, token_str))
                 print(f"[DEBUG] Client added to lobby with token {token_str!r} (lobby size={len(lobby)})")

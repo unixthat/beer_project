@@ -21,7 +21,7 @@ _last_rekey_time = time.time()
 _MAGIC = 0xBEEF
 _VERSION = 1
 
-_secret_key: bytes = bytes(range(16))
+_secret_key: bytes | None = None
 
 # Private key placeholder for rekey handshake
 _rekey_priv_key = None

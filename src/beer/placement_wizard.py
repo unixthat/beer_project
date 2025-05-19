@@ -22,6 +22,10 @@ class PlacementTimeout(Exception):
 
 
 def run(board: Board, r: TextIO, w: TextIO, safe_read: Callable[[TextIO], str]) -> bool:
+    # Auto-place immediately if timeout disabled
+    if _cfg.PLACEMENT_TIMEOUT <= 0:
+        board.place_ships_randomly()
+        return True
     # Ask preference
     io_send(w, 0, msg="INFO Manual placement? [y/N]")
     # Wait up to PLACEMENT_TIMEOUT for the manual-placement answer

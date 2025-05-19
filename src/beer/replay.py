@@ -25,3 +25,17 @@ class ReplayWindow:
         # purge old seq numbers below highest_seq - window_size
         cutoff = self.highest_seq - self.window_size
         self.received = {s for s in self.received if s > cutoff}
+
+    def validate(self, seq: int) -> bool:
+        """Check and update in one call; return True if fresh, False if replayed or too-old."""
+        if seq <= self.highest_seq - self.window_size:
+            return False
+        if seq in self.received:
+            return False
+        # record receipt and update window
+        self.received.add(seq)
+        if seq > self.highest_seq:
+            self.highest_seq = seq
+        cutoff = self.highest_seq - self.window_size
+        self.received = {s for s in self.received if s > cutoff}
+        return True

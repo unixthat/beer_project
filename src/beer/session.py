@@ -93,9 +93,9 @@ class GameSession(threading.Thread):
             self.p2_sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         except Exception:
             pass  # Not all platforms support this, but try
-        self.p1_file_r: TextIO = p1.makefile("r")
+        self.p1_file_r: TextIO = p1.makefile("r", encoding="utf-8", errors="ignore")
         self.p1_file_w: TextIO = p1.makefile("w")
-        self.p2_file_r: TextIO = p2.makefile("r")
+        self.p2_file_r: TextIO = p2.makefile("r", encoding="utf-8", errors="ignore")
         self.p2_file_w: TextIO = p2.makefile("w")
         # Ship roster for this match
         self.ships = ships if ships is not None else SHIPS
@@ -399,11 +399,11 @@ class GameSession(threading.Thread):
         """Rebind player slot to a new socket after reconnect."""
         if slot == 1:
             self.p1_sock = sock
-            self.p1_file_r = sock.makefile("r")
+            self.p1_file_r = sock.makefile("r", encoding="utf-8", errors="ignore")
             self.p1_file_w = sock.makefile("w")
         else:
             self.p2_sock = sock
-            self.p2_file_r = sock.makefile("r")
+            self.p2_file_r = sock.makefile("r", encoding="utf-8", errors="ignore")
             self.p2_file_w = sock.makefile("w")
 
         # After rebinding, push the current boards to the re-attached player.

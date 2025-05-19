@@ -10,18 +10,21 @@ Low-level helpers shared by GameSession and its sub-modules
 
 from typing import Any, TextIO, Callable, List, Tuple
 from .config import TURN_TIMEOUT
-from .common import PacketType, send_pkt
+from .common import PacketType, send_pkt, recv_pkt
 from .battleship import Board
 from .commands import parse_command, ChatCommand, FireCommand, QuitCommand, CommandParseError
 import socket
 from .encryption import get_rekey_pub
+import logging
+
+logger = logging.getLogger("beer.io_utils")
 
 
 def send(
     w: TextIO, seq: int, ptype: PacketType = PacketType.GAME, *, msg: str | None = None, obj: Any | None = None
 ) -> bool:
     # Debug print of send parameters
-    print(f"[DBG send] seq={seq} msg={msg} obj={obj}")
+    logger.debug("send() start – ptype=%s seq=%d msg=%r obj=%r", ptype, seq, msg, obj)
     payload = obj if obj is not None else {"msg": msg}
     # Attempt to detect EOF on underlying socket, if available
     sock = None
@@ -49,34 +52,34 @@ def send(
     try:
         send_pkt(w.buffer, ptype, seq, payload)  # type: ignore[arg-type]
         w.buffer.flush()
-        print(f"[DBG send] success seq={seq}")
+        logger.debug("send() success – ptype=%s seq=%d", ptype, seq)
         return True
     except (BrokenPipeError, ConnectionResetError):
         # peer closed or reset during send
         return False
     except Exception as e:
-        print(f"[ERROR] send failed: {e}")
+        logger.exception("send() failed – seq=%d ptype=%s", seq, ptype)
         return False
 
 
 def grid_rows(board: Board, *, reveal: bool = False) -> List[str]:
-    print(f"[DBG grid_rows] reveal={reveal}")
+    logger.debug("grid_rows() start – reveal=%s", reveal)
     rows: list[str] = []
     for r in range(board.size):
         cell_row = [board.hidden_grid[r][c] if reveal else board.display_grid[r][c] for c in range(board.size)]
         rows.append(" ".join(cell_row))
-    print(f"[DBG grid_rows] rows_count={len(rows)}")
+    logger.debug("grid_rows() result – rows_count=%d", len(rows))
     return rows
 
 
 def send_grid(w: TextIO, seq: int, board: Board, *, reveal: bool = False) -> bool:
-    print(f"[DBG send_grid] seq={seq} reveal={reveal}")
+    logger.debug("send_grid() – seq=%d reveal=%s", seq, reveal)
     return send(w, seq, PacketType.GAME, obj={"type": "grid", "rows": grid_rows(board, reveal=reveal)})
 
 
 def send_opp_grid(w: TextIO, seq: int, board: Board) -> bool:
     """Reveal the _opponent_ ship map (hidden_grid) to a client."""
-    print(f"[DBG send_opp_grid] seq={seq} reveal_opponent")
+    logger.debug("send_opp_grid() – seq=%d reveal_opponent", seq)
     return send(
         w,
         seq,
@@ -93,22 +96,25 @@ def safe_readline(
     while True:
         try:
             line = reader.readline()
+        except UnicodeDecodeError:
+            # skip binary frame data silently
+            continue
         except (OSError, ConnectionResetError) as e:
-            print(f"[DBG safe_readline] error {e}")
+            logger.debug("safe_readline() error – %s", e)
             line = ""
         if line:
-            print(f"[DBG safe_readline] got line {line!r}")
+            logger.debug("safe_readline() got line %r", line)
             return line
         if attempts == 0 and on_disconnect():
-            print(f"[DBG safe_readline] reconnect attempt")
+            logger.debug("safe_readline() reconnect attempt")
             attempts += 1
             continue
-        print("[DBG safe_readline] returning empty line")
+        logger.debug("safe_readline() returning empty line")
         return ""
 
 
 def chat_broadcast(writers: list[TextIO], seq: int, idx: int, chat_txt: str, payload: Any) -> int:
-    print(f"[DBG chat_broadcast] idx={idx} chat_txt={chat_txt}")
+    logger.debug("chat_broadcast() – idx=%d chat_txt=%r", idx, chat_txt)
     for w in writers:
         send(w, seq, PacketType.CHAT, msg=f"[CHAT] P{idx}: {chat_txt}", obj=payload)
         seq += 1
@@ -129,92 +135,99 @@ def recv_turn(
     defender_w: TextIO,
 ) -> Any:
     import select as _select, time as _time
-
-    # Debug prints removed; internal logic unchanged
-    first_select = False
-
+    # Debug: entry into recv_turn
+    try:
+        logger.debug("recv_turn start – attacker_sock=%r defender_sock=%r", r.buffer.raw._sock, defender_r.buffer.raw._sock)
+    except Exception:
+        logger.debug("recv_turn start – could not access raw sockets for debug")
     start = _time.time()
     while True:
-        att_sock = r.buffer.raw._sock  # type: ignore[attr-defined]
-        def_sock = defender_r.buffer.raw._sock  # type: ignore[attr-defined]
+        att_sock = r.buffer.raw._sock
+        def_sock = defender_r.buffer.raw._sock
         remaining = TURN_TIMEOUT - (_time.time() - start)
+        logger.debug("recv_turn timer – remaining timeout=%.3f seconds", remaining)
         if remaining <= 0:
             return None
-        readable, _, _ = _select.select([att_sock, def_sock], [], [], remaining)
-        if att_sock in readable and def_sock in readable:
-            readable.sort(key=lambda s: 0 if s is att_sock else 1)
+
+        # Only block on the attacker socket
+        readable, _, _ = _select.select([att_sock], [], [], remaining)
+        logger.debug("recv_turn select – readable=%r", readable)
         if not readable:
             return None
-        for sock in readable:
-            file = r if sock is att_sock else defender_r
-            writer = w if file is r else defender_w
-            slot = 1 if file is session.p1_file_r else 2
 
-            # ---- only the attacker socket ever "leaves" on empty/EOF ----
-            if sock is att_sock and session._is_eof(sock):
-                return "ATTACKER_LEFT"
-
-            # Now there is actual data ready: read it
-            try:
-                raw_line = file.readline()
-            except (OSError, ConnectionResetError):
-                raw_line = ""
-            if not raw_line:
-                # only attacker empties are left events; defender just falls through
-                if sock is att_sock:
-                    return "ATTACKER_LEFT"
-                continue
-
-            line = raw_line.strip()
-            try:
-                cmd = parse_command(line)
-            except CommandParseError as e:
-                send(writer, session.io_seq, msg=f"ERR {e}")
-                session.io_seq += 1
-                continue
-            if sock is def_sock:
-                if isinstance(cmd, ChatCommand):
-                    # send to both players
+        # Process attacker input
+        file = r
+        writer = w
+        try:
+            logger.debug("recv_turn() – only waiting on attacker socket")
+            while True:
+                ptype2, seq2, obj = recv_pkt(file.buffer)
+                logger.debug("recv_turn frame – ptype=%s seq=%d obj=%r", ptype2, seq2, obj)
+                # Skip non-GAME packets
+                if ptype2 != PacketType.GAME:
+                    logger.debug("recv_turn skip non-GAME packet ptype=%s seq=%d", ptype2, seq2)
+                    continue
+                if isinstance(obj, dict):
+                    line = obj.get("msg", "")
+                else:
+                    line = obj or ""
+                logger.debug("recv_turn() framed line – %r", line)
+                ul = line.strip().upper()
+                if ul.startswith("FIRE ") or ul == "QUIT":
+                    cmd = parse_command(line)
+                    logger.debug("recv_turn parsed command – %r", cmd)
+                    if isinstance(cmd, QuitCommand):
+                        logger.debug("recv_turn returning QUIT")
+                        return "QUIT"
+                    if isinstance(cmd, FireCommand):
+                        logger.debug("recv_turn returning FIRE at (%d,%d)", cmd.row, cmd.col)
+                        return (cmd.row, cmd.col)
+                elif ul.startswith("CHAT "):
+                    cmd = parse_command(line)
+                    sender = session.current or 1
+                    name = f"P{sender}"
                     session.io_seq = chat_broadcast(
                         [session.p1_file_w, session.p2_file_w],
                         session.io_seq,
-                        2,
+                        sender,
                         cmd.text,
-                        {"name": "P2", "msg": cmd.text},
+                        {"name": name, "msg": cmd.text},
                     )
-                    # also send to any waiting spectators
-                    session._broadcast(None, {"type": "chat", "name": "P2", "msg": cmd.text})
+                    session._broadcast(None, {"type": "chat", "name": name, "msg": cmd.text})
                     continue
-                if isinstance(cmd, QuitCommand):
-                    session._conclude(1, reason="concession")
-                    return None
-                if isinstance(cmd, FireCommand):
-                    send(defender_w, session.io_seq, msg="ERR Not your turn – wait for your turn prompt")
+                else:
+                    send(writer, session.io_seq, msg="ERR Invalid command. Use: FIRE <A-J1-10> or QUIT")
                     session.io_seq += 1
                     continue
-                send(defender_w, session.io_seq, msg="ERR Invalid command. Use: FIRE <A-J1-10> or QUIT")
-                session.io_seq += 1
-                continue
-            if isinstance(cmd, ChatCommand):
-                # attacker→both players
-                session.io_seq = chat_broadcast(
-                    [session.p1_file_w, session.p2_file_w],
-                    session.io_seq,
-                    1,
-                    cmd.text,
-                    {"name": "P1", "msg": cmd.text},
-                )
-                # attacker chat → also to spectators
-                session._broadcast(None, {"type": "chat", "name": "P1", "msg": cmd.text})
-                continue
-            if isinstance(cmd, QuitCommand):
-                return "QUIT"
-            if isinstance(cmd, FireCommand):
-                return (cmd.row, cmd.col)
-            # unknown command fallback
-            send(w, session.io_seq, msg="ERR Unknown error processing command")
+        except CommandParseError as e:
+            send(writer, session.io_seq, msg=f"ERR {e}")
             session.io_seq += 1
             continue
+        except Exception:
+            continue
+
+        # Non-blocking check for defender chat (out-of-turn)
+        try:
+            readable_def, _, _ = _select.select([def_sock], [], [], 0)
+            if def_sock in readable_def:
+                ptype3, seq3, obj3 = recv_pkt(defender_r.buffer)
+                if ptype3 == PacketType.GAME and isinstance(obj3, dict):
+                    line3 = obj3.get("msg", "")
+                    ul3 = line3.strip().upper()
+                    if ul3.startswith("CHAT "):
+                        cmd3 = parse_command(line3)
+                        sender3 = 2 if session.current == 1 else 1
+                        name3 = f"P{sender3}"
+                        session.io_seq = chat_broadcast(
+                            [session.p1_file_w, session.p2_file_w],
+                            session.io_seq,
+                            sender3,
+                            cmd3.text,
+                            {"name": name3, "msg": cmd3.text},
+                        )
+                        session._broadcast(None, {"type": "chat", "name": name3, "msg": cmd3.text})
+        except Exception:
+            pass
 
 
 def refresh_views(
@@ -224,7 +237,7 @@ def refresh_views(
     board1: Board,
     board2: Board,
 ) -> Tuple[bool, bool, int]:
-    print(f"[DBG refresh_views] seq={seq}")
+    logger.debug("refresh_views() start – seq=%d", seq)
     ok1 = send_grid(w1, seq, board1, reveal=True)
     seq += 1
     ok2 = send_grid(w2, seq, board2, reveal=True)
@@ -233,5 +246,5 @@ def refresh_views(
     seq += 1
     send_grid(w2, seq, board1)
     seq += 1
-    print(f"[DBG refresh_views] done seq={seq}")
+    logger.debug("refresh_views() done – seq=%d", seq)
     return ok1, ok2, seq
