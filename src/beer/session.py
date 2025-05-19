@@ -60,7 +60,7 @@ from . import config as _cfg
 from .events import Event, Category
 from .coord_utils import coord_to_rowcol, format_coord, COORD_RE
 
-TURN_TIMEOUT = _cfg.TURN_TIMEOUT  # seconds
+SHOT_CLOCK = _cfg.TIMEOUT  # seconds for both turn and reconnect wait
 
 
 class GameSession(threading.Thread):
@@ -132,8 +132,9 @@ class GameSession(threading.Thread):
 
         # Initialize reconnect controller (registers both tokens)
         from .server import PID_REGISTRY
+
         self.recon = ReconnectController(
-            TURN_TIMEOUT,
+            SHOT_CLOCK,
             self._notify_player,
             self.token_p1,
             self.token_p2,
@@ -226,6 +227,9 @@ class GameSession(threading.Thread):
                         return
                     # Resume loop after successful reconnect
                     continue
+
+                raw = obj["msg"]
+                # Parse the incoming command
                 try:
                     cmd = parse_command(cmd_line)
                 except CommandParseError as e:
@@ -453,10 +457,10 @@ class GameSession(threading.Thread):
         for idx in dropped_slots:
             if self.recon.wait(idx):
                 logging.info(f"Player {idx} reconnected – resuming match")
+                # pull the socket *after* wait() so INFO messages were sent
                 new_sock = self.recon.take_new_socket(idx)
                 self._rebind_slot(idx, new_sock)
                 continue
-            # No recon and no in-session promotion → mark as failure
             failed.append(idx)
         if failed:
             if set(failed) == {1, 2}:
@@ -523,6 +527,7 @@ class GameSession(threading.Thread):
     def _control_loop(self, ctrl_reader, data_writer_buf):  # binary reader, BufferedWriter
         """Loop reading ACK/NAK control frames and invoke retransmit/prune."""
         from .common import PacketType
+
         while True:
             try:
                 ptype, seq, obj = unpack(ctrl_reader)

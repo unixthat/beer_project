@@ -19,20 +19,6 @@ TEST_LOG_DIR = Path(__file__).resolve().parent.parent / "tests" / "logs"
 
 
 # ===========================================================================
-# Bot Timing Controls
-# ===========================================================================
-# BEER_BOT_DELAY: Delay (in seconds) between each bot shot/action.
-#   Defaults to 0.0 (maximum speed).
-#   Example: export BEER_BOT_DELAY=0.05
-BOT_LOOP_DELAY: float = float(os.getenv("BEER_BOT_DELAY", "0"))
-
-# BEER_BOT_DELAY_START: Delay (in seconds) before the bot fires its very first shot after connecting.
-#   Defaults to 0.0. Useful for allowing spectators or other clients to join before the game begins.
-#   Example: export BEER_BOT_DELAY_START=1.0
-DELAY_START: float = float(os.getenv("BEER_BOT_DELAY_START", "0"))
-
-
-# ===========================================================================
 # Bot Algorithm Selection
 # ===========================================================================
 # BEER_SIMPLE_BOT: If "1", the bot uses a simplistic parity-only targeting strategy.
@@ -69,40 +55,17 @@ DEFAULT_PORT: int = int(os.getenv("BEER_PORT", "61337"))
 
 
 # ===========================================================================
-# Gameplay Timing
+# Unified Action & Reconnect Timeout
 # ===========================================================================
-# BEER_TURN_TIMEOUT: Timeout (in seconds) for a player to issue a FIRE command.
-#   Defaults to 180 (3 minutes).
-#   Example: export BEER_TURN_TIMEOUT=60
-TURN_TIMEOUT: int = int(os.getenv("BEER_TURN_TIMEOUT", "600"))
-
-# BEER_PLACE_TIMEOUT: Timeout (in seconds) for a player to complete manual ship placement.
-#   Defaults to 30.
-#   Example: export BEER_PLACE_TIMEOUT=60
-PLACEMENT_TIMEOUT: int = int(os.getenv("BEER_PLACE_TIMEOUT", "0"))
+# BEER_TIMEOUT: seconds for both "your turn" inactivity and reconnect wait.
+# Defaults to 60 seconds. Example: export BEER_TIMEOUT=30
+TIMEOUT: float = float(os.getenv("BEER_TIMEOUT", "60"))
 
 # ===========================================================================
-# Reconnect Window
+# Default Ports
 # ===========================================================================
-# BEER_RECONNECT_TIMEOUT: How many seconds to wait for a dropped player to re-attach.
-#   Defaults to 60.
-#   Example: export BEER_RECONNECT_TIMEOUT=120
-RECONNECT_TIMEOUT: int = int(os.getenv("BEER_RECONNECT_TIMEOUT", "60"))
-
-# How long the server waits (seconds) for the very first line on a fresh TCP
-# connection – gives reconnecting clients time to transmit "TOKEN <hex>".
-# Default to 0 for immediate lobby join; override via BEER_HANDSHAKE_TIMEOUT if needed.
-RECONNECT_HANDSHAKE_TIMEOUT: float = float(os.getenv("BEER_HANDSHAKE_TIMEOUT", "0"))
-
-
-# ===========================================================================
-# Cryptography
-# ===========================================================================
-# BEER_KEY: Default AES encryption key (as a hex string) if encryption is enabled.
-#   Defaults to "00112233445566778899AABBCCDDEEFF".
-#   Example: export BEER_KEY=YOUR_SECRET_HEX_KEY
-DEFAULT_KEY_HEX: str = os.getenv("BEER_KEY", "00112233445566778899AABBCCDDEEFF")
-DEFAULT_KEY: bytes = bytes.fromhex(DEFAULT_KEY_HEX)
+# BEER_TEST_PORT: port to use in automated tests (default 61338)
+TEST_PORT: int = int(os.getenv("BEER_TEST_PORT", "61338"))
 
 
 # ===========================================================================
@@ -146,7 +109,10 @@ DEBUG: bool = os.getenv("BEER_DEBUG", "0") == "1"
 #   Example: export BEER_QUIET="chat,spec_grid"
 QUIET_CATEGORIES: list[str] = os.getenv("BEER_QUIET", "").split(",") if os.getenv("BEER_QUIET") else []
 
-# BEER_HEARTBEAT_INTERVAL: Interval (in seconds) for server-client keep-alive heartbeats.
-#   Defaults to 1.0.
-#   Example: export BEER_HEARTBEAT_INTERVAL=5.0
-HEARTBEAT_INTERVAL: float = float(os.getenv("BEER_HEARTBEAT_INTERVAL", "1.0"))
+# ===========================================================================
+# Cryptography Defaults
+# ===========================================================================
+# BEER_KEY: AES encryption key as a hex string.
+# Defaults to "00112233445566778899AABBCCDDEEFF".
+DEFAULT_KEY_HEX: str = os.getenv("BEER_KEY", "00112233445566778899AABBCCDDEEFF")
+DEFAULT_KEY: bytes = bytes.fromhex(DEFAULT_KEY_HEX)

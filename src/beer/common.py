@@ -62,8 +62,8 @@ class PacketType(int, enum.Enum):
 
     GAME = 0
     CHAT = 1
-    ACK = 2           # Acknowledgement: seq carries the acknowledged packet number
-    NAK = 3           # Negative-ack: request retransmission of seq number
+    ACK = 2  # Acknowledgement: seq carries the acknowledged packet number
+    NAK = 3  # Negative-ack: request retransmission of seq number
     OPP_GRID = 4
 
 
@@ -73,6 +73,7 @@ class FrameError(Exception):
 
 class CrcError(FrameError):
     """Raised when a CRC-32 check fails while decoding a frame, carrying the seq number."""
+
     def __init__(self, seq: int):
         super().__init__(f"CRC mismatch for seq {seq}")
         self.seq = seq
@@ -181,6 +182,7 @@ __all__ = [
     "recv_pkt",
     "handle_control_frame",
 ]
+
 
 def handle_control_frame(w: BufferedWriter, ptype: PacketType, seq: int) -> None:
     """Process ACK/NAK frames on writer *w*: prune on ACK, retransmit on NAK."""

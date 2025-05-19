@@ -10,7 +10,7 @@ Low-level helpers shared by GameSession and its sub-modules (cleaned up)
 
 import socket
 from typing import Any, TextIO, Callable, List, Tuple
-from .config import TURN_TIMEOUT
+from .config import TIMEOUT
 from .common import PacketType, send_pkt, unpack
 from .battleship import Board
 from .commands import parse_command, ChatCommand, FireCommand, QuitCommand, CommandParseError
@@ -128,7 +128,7 @@ def recv_turn(
     while True:
         att_sock = r.buffer.raw._sock  # type: ignore[attr-defined]
         def_sock = defender_r.buffer.raw._sock  # type: ignore[attr-defined]
-        remaining = TURN_TIMEOUT - (_time.time() - start)
+        remaining = TIMEOUT - (_time.time() - start)
         if remaining <= 0:
             return None
         readable, _, _ = _select.select([att_sock, def_sock], [], [], remaining)
@@ -241,8 +241,8 @@ def recv_cmd(r: BufferedReader) -> str:
     while True:
         ptype, seq, obj = unpack(r)
         if ptype == PacketType.GAME:
-            if isinstance(obj, dict) and 'msg' in obj:
-                return obj['msg']
+            if isinstance(obj, dict) and "msg" in obj:
+                return obj["msg"]
             break
         # skip other frame types (CHAT, ACK, NAK, etc.)
     return ""

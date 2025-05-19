@@ -123,6 +123,7 @@ try:
 except ImportError:
     readline = None
 
+
 def _prompt() -> None:
     """Display the user-input prompt, preserving any typed text."""
     # Always clear the current line and print a fresh blank prompt
@@ -132,12 +133,13 @@ def _prompt() -> None:
 
 # Flag that controls whether the main loop has shown the ">> " prompt
 _prompt_shown = False
+_spectator_mode = False  # once set, we'll drop any user input
 
 
 def _recv_loop(
     sock: socket.socket, stop_evt: threading.Event, verbose: int, cheat_mode: bool, cheater: Cheater
 ) -> None:  # pragma: no cover
-    global _prompt_shown
+    global _prompt_shown, _spectator_mode
 
     """Continuously print messages from the server (framed packets only)."""
     global TOKEN
@@ -272,6 +274,9 @@ def _recv_loop(
                         or msg.startswith("OPPONENT ")
                         or msg.startswith("SUNK ")
                     ):
+                        # if the server tells us we're spectating, turn on drop mode
+                        if msg.startswith("INFO You are now spectating"):
+                            _spectator_mode = True
                         # color sunk notifications red
                         out = msg
                         if msg.startswith("SUNK "):
@@ -338,15 +343,15 @@ def main() -> None:  # pragma: no cover – CLI entry
         "-m",
         "--miss-rate",
         type=float,
-        default=0.0,
-        help="Probability (0–1) of injecting random misses when cheating",
+        default=None,
+        help="Probability (0–1) of injecting random misses when cheating; default=random each match",
     )
     parser.add_argument(
         "-c",
         "--delay",
         type=float,
-        default=0.0,
-        help="Delay in seconds between cheat shots",
+        default=Cheater.DEFAULT_CHEAT_DELAY,
+        help="Seconds to wait after 'YOUR TURN' before firing in cheat mode (default=1.0)",
     )
     args = parser.parse_args()
 
@@ -400,6 +405,7 @@ def _client(s, args, cheat_mode: bool = False):
 
     # Spawn input thread for non-blocking, readline-powered prompt
     input_queue = queue.Queue()
+
     def _input_thread():
         while not stop_evt.is_set():
             try:
@@ -410,6 +416,7 @@ def _client(s, args, cheat_mode: bool = False):
                 input_queue.put(None)
                 break
             input_queue.put(line)
+
     threading.Thread(target=_input_thread, daemon=True).start()
 
     # Note: wfile and client_seq were initialized above for the handshake
@@ -442,6 +449,9 @@ def _client(s, args, cheat_mode: bool = False):
                 continue
             if user_input is None:
                 break
+            # once we're in spectator mode, ignore any keystrokes
+            if _spectator_mode:
+                continue
             text = user_input.strip()
             # Allow slash-prefixed commands (e.g. /CHAT, /FIRE, /QUIT)
             if text.startswith("/"):

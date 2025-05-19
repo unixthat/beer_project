@@ -149,7 +149,9 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
             try:
                 wfile = sock.makefile("w")
                 # if obj is a chat payload, send as CHAT frame
-                ptype = PacketType.CHAT if obj and isinstance(obj, dict) and obj.get("type") == "chat" else PacketType.GAME
+                ptype = (
+                    PacketType.CHAT if obj and isinstance(obj, dict) and obj.get("type") == "chat" else PacketType.GAME
+                )
                 io_send(wfile, 0, ptype, msg=msg, obj=obj)
             except Exception:
                 pass
@@ -208,14 +210,14 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
                     reason = sess.win_reason or ""
                     # report with PID tokens
                     winning_tok = sess.token_p1 if winner == 1 else sess.token_p2
-                    losing_tok  = sess.token_p2 if winner == 1 else sess.token_p1
+                    losing_tok = sess.token_p2 if winner == 1 else sess.token_p1
                     logger.info(f"Match completed – {winning_tok} won by {reason}")
                     # broadcast concession to waiting spectators
                     if reason == "concession":
                         lobby_broadcast(f"INFO Player {losing_tok} has forfeited – match over", None)
                         logger.info(f"{losing_tok} concedes – match over")
                     # Notify current spectators of the match result
-                    shots = getattr(sess, 'win_shots', None) or 0
+                    shots = getattr(sess, "win_shots", None) or 0
                     winning_tok = sess.token_p1 if winner == 1 else sess.token_p2
                     losing_tok = sess.token_p2 if winner == 1 else sess.token_p1
                     result_msg = f"INFO {winning_tok} BEAT {losing_tok} IN {shots} SHOTS"
@@ -248,8 +250,6 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
                 session_ready.wait()
                 threading.Thread(target=_monitor_session, args=(current_session,), daemon=True).start()
 
-        # Heartbeat disabled – rely on TCP disconnects instead
-
         try:
             while True:
                 # Accept new connection (blocking)
@@ -259,21 +259,22 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
                 try:
                     br = conn.makefile("rb")
                     bw = conn.makefile("wb")
-                    ptype, seq, obj = recv_pkt(br)  # handshake frame
-                    # ACK the handshake so client prunes that seq
+                    ptype, seq, obj = recv_pkt(br)
                     send_pkt(bw, PacketType.ACK, seq, None)
                     token_str = obj.get("token") if isinstance(obj, dict) else None
-                    logger.debug("Received framed handshake token: %r", token_str)
                 except Exception:
                     token_str = None
+
                 # Reconnect attempt?
                 if token_str:
                     ctrl = PID_REGISTRY.get(token_str)
+                    # only attempt reattach if we found a controller
                     if ctrl:
                         if ctrl.attach_player(token_str, conn):
                             logger.info(f"Reattached via PID-token {token_str}")
                         # don't enqueue as new spectator or pair into play
                         continue
+
                 # Always treat fresh connections as waiting/spectating clients
                 lobby.append((conn, token_str))
                 # New spectator waiting in lobby

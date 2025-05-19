@@ -8,6 +8,7 @@ from .battleship import SHIP_LETTERS
 # Ship letters defined in battleship.SHIP_LETTERS
 _SHIP_CHARS = set(SHIP_LETTERS.values())
 
+
 # Only treat a grid as a "reveal" if it actually shows ships
 def _is_reveal_grid(rows: list[str]) -> bool:
     """Return True if rows contain any ship letter."""
@@ -24,13 +25,22 @@ class Cheater:
     packet the server gives you, then hands out exactly those coords.
     """
 
-    def __init__(self, miss_rate: float = 0.0, delay: float = 0.5):
+    # Default cheat timing: 1s delay; miss_rate=None means random per match.
+    DEFAULT_CHEAT_DELAY = 1.0
+
+    def __init__(self, miss_rate=None, delay=DEFAULT_CHEAT_DELAY):
+        """
+        miss_rate: float between 0–1, or None to pick a random miss rate per match.
+        delay: seconds to wait after receiving your turn prompt.
+        """
         self._targets = deque()
         self._seeded = False
         self._turn_ready = False
         self._last_rows: list[str] | None = None
         self._fired: set[str] = set()
-        self.miss_rate = miss_rate
+        # Keep the user's chosen rate; internal .miss_rate is set at each new match
+        self._user_miss_rate = miss_rate
+        self.miss_rate = None
         self.delay = delay
 
     def feed_grid(self, rows: list[str]) -> None:
@@ -47,9 +57,15 @@ class Cheater:
 
         # Only (re)seed when we haven't seeded yet, or have exhausted prior targets
         if not self._seeded or not self._targets:
-            # Clear old targets (important between games)
+            # Start of a new match: reset targets/fired, pick miss_rate
             self._targets.clear()
             self._fired.clear()
+            # Randomize miss_rate if not explicitly set
+            if self._user_miss_rate is None:
+                self.miss_rate = random.random()
+            else:
+                self.miss_rate = self._user_miss_rate
+            # Build target list
             for r, line in enumerate(rows):
                 for c, cell in enumerate(line.split()):
                     if cell in _SHIP_CHARS:
