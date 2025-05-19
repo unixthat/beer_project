@@ -242,18 +242,20 @@ class GameSession(threading.Thread):
 
                 # Handle Chat
                 if isinstance(cmd, ChatCommand):
-                    payload = {"name": f"P{current_player}", "msg": cmd.text}
-                    # Send chat to both players
+                    # Broadcast to the two players
                     self.io_seq = chat_broadcast(
                         [self.p1_file_w, self.p2_file_w],
                         self.io_seq,
                         current_player,
                         cmd.text,
-                        payload,
+                        {"name": f"P{current_player}", "msg": cmd.text},
                     )
-                    # Also deliver to spectators
-                    self._broadcast(payload, PacketType.CHAT)
-                    # Emit event for routing
+                    # Also deliver as a CHAT frame to all spectators
+                    self._broadcast(
+                        None,
+                        {"type": "chat", "name": f"P{current_player}", "msg": cmd.text},
+                    )
+                    # Server-side event routing
                     self._emit(Event(Category.CHAT, "line", {"player": current_player, "msg": cmd.text}))
                     continue
 
@@ -271,6 +273,9 @@ class GameSession(threading.Thread):
                 defender_w = self.p2_file_w if current_player == 1 else self.p1_file_w
                 attacker_w = self.p1_file_w if current_player == 1 else self.p2_file_w
                 result, sunk_name = defender_board.fire_at(row, col)
+                # Track shot count for winner stats
+                self._shots[current_player] += 1
+
                 coord_txt = format_coord(row, col)
                 # Build messages
                 if result == "hit":
@@ -284,7 +289,14 @@ class GameSession(threading.Thread):
                 self.io_seq += 1
                 io_send(defender_w, self.io_seq, PacketType.GAME, msg=defender_msg)
                 self.io_seq += 1
-                # Event routing
+                # Report sunk ships
+                if sunk_name:
+                    io_send(attacker_w, self.io_seq, PacketType.GAME, msg=f"SUNK {sunk_name}")
+                    self.io_seq += 1
+                    io_send(defender_w, self.io_seq, PacketType.GAME, msg=f"SUNK {sunk_name}")
+                    self.io_seq += 1
+
+                # Event routing to spectators (shot events)
                 self._broadcast(
                     {"player": current_player, "coord": coord_txt, "result": result, "sunk": sunk_name},
                     PacketType.GAME,
@@ -298,6 +310,15 @@ class GameSession(threading.Thread):
                     self.board_p1,
                     self.board_p2,
                 )
+                # Spectators get full dual-board every full turn (2 half-turns)
+                self._half_turn_counter += 1
+                if self._half_turn_counter % 2 == 0:
+                    rows_p1 = grid_rows(self.board_p1, reveal=True)
+                    rows_p2 = grid_rows(self.board_p2, reveal=True)
+                    self._broadcast(
+                        None,
+                        {"type": "spec_grid", "rows_p1": rows_p1, "rows_p2": rows_p2},
+                    )
 
                 # Game over
                 if defender_board.all_ships_sunk():
@@ -339,21 +360,27 @@ class GameSession(threading.Thread):
     # ------------------------------------------------------------
     def _sync_state(self, slot: int) -> None:
         """
-        Send two GRID frames to the client that has just re-attached:
+        Send up-to-date board state to a re-attaching client.
 
-        • first – their own fleet view (ships revealed)
-        • second – fog-of-war view of the opponent
-
-        `self.io_seq` is bumped for each frame so spectators stay in sync.
+        • first – their own fleet reveal
+        • second – opponent hidden grid (for cheats to re-seed)
+        • third – opponent fog-of-war view
         """
-        from .io_utils import send_grid  # local import avoids cycle
+        from .io_utils import send_grid, send_opp_grid  # ensure send_opp_grid is imported
 
         writer = self.p1_file_w if slot == 1 else self.p2_file_w
         own = self.board_p1 if slot == 1 else self.board_p2
         opp = self.board_p2 if slot == 1 else self.board_p1
 
+        # 1) your own ships
         send_grid(writer, self.io_seq, own, reveal=True)
         self.io_seq += 1
+
+        # 2) hidden opponent map for cheat clients
+        send_opp_grid(writer, self.io_seq, opp)
+        self.io_seq += 1
+
+        # 3) fog-of-war view of opponent
         send_grid(writer, self.io_seq, opp, reveal=False)
         self.io_seq += 1
 

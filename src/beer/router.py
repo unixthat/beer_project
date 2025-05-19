@@ -81,12 +81,8 @@ class EventRouter:
     def _handle_chat(self, ev: Event) -> None:
         if ev.type != "line":
             return
-        payload = {
-            "type": "chat",
-            "name": f"P{ev.payload['player']}",
-            "msg": ev.payload["msg"],
-        }
-        self._broadcast(payload, PacketType.CHAT)
+        # log chat on server; clients already get it directly from GameSession
+        logger.info(f"[CHAT] P{ev.payload['player']}: {ev.payload['msg']}")
 
     def _handle_system(self, ev: Event) -> None:
         # Currently no dedicated SYSTEM packets.

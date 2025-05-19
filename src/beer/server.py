@@ -20,11 +20,10 @@ import itertools
 
 from .session import GameSession
 from .reconnect_controller import ReconnectController
-from .common import enable_encryption, DEFAULT_KEY
+from .common import enable_encryption, DEFAULT_KEY, recv_pkt, send_pkt, PacketType
 from .battleship import SHIPS
 from . import config as _cfg
 from .events import Event
-from .common import PacketType
 from .router import EventRouter
 from .io_utils import send as io_send, grid_rows
 
@@ -149,7 +148,9 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
         for sock, _ in lobby:
             try:
                 wfile = sock.makefile("w")
-                io_send(wfile, 0, msg=msg, obj=obj)
+                # if obj is a chat payload, send as CHAT frame
+                ptype = PacketType.CHAT if obj and isinstance(obj, dict) and obj.get("type") == "chat" else PacketType.GAME
+                io_send(wfile, 0, ptype, msg=msg, obj=obj)
             except Exception:
                 pass
 
@@ -205,10 +206,14 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
                     sess.join()
                     winner = sess.winner or 0
                     reason = sess.win_reason or ""
-                    print(f"[INFO] Match completed – P{winner} won by {reason}.")
-                    # If match ended by concession, notify remaining spectators of the forfeiture
+                    # report with PID tokens
+                    winning_tok = sess.token_p1 if winner == 1 else sess.token_p2
+                    losing_tok  = sess.token_p2 if winner == 1 else sess.token_p1
+                    logger.info(f"Match completed – {winning_tok} won by {reason}")
+                    # broadcast concession to waiting spectators
                     if reason == "concession":
-                        lobby_broadcast(f"INFO Player {losing_tok} has forfeited – match ended by concession", None)
+                        lobby_broadcast(f"INFO Player {losing_tok} has forfeited – match over", None)
+                        logger.info(f"{losing_tok} concedes – match over")
                     # Notify current spectators of the match result
                     shots = getattr(sess, 'win_shots', None) or 0
                     winning_tok = sess.token_p1 if winner == 1 else sess.token_p2
@@ -216,18 +221,8 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
                     result_msg = f"INFO {winning_tok} BEAT {losing_tok} IN {shots} SHOTS"
                     # Broadcast result to all waiting spectators
                     lobby_broadcast(result_msg, None)
-                    # Inform each spectator of their status and queue position
-                    for idx, (sock, _) in enumerate(lobby, start=1):
-                        # skip the next-up client (position 1)
-                        if idx == 1:
-                            continue
-                        try:
-                            wfile = sock.makefile("w")
-                            io_send(wfile, 0, msg="INFO You are now spectating")
-                            io_send(wfile, 0, msg=f"INFO You are currently number {idx} in the queue to play")
-                        except Exception:
-                            pass
-                    # Now re-queue both players back into lobby
+                    logger.info(f"Spectators notified: {result_msg}")
+                    # Re-queue both players back into lobby
                     if winner == 1:
                         w_sock, w_tok = sess.p1_sock, sess.token_p1
                         l_sock, l_tok = sess.p2_sock, sess.token_p2
@@ -235,7 +230,18 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
                         w_sock, w_tok = sess.p2_sock, sess.token_p2
                         l_sock, l_tok = sess.p1_sock, sess.token_p1
                     requeue_players(lobby, (w_sock, w_tok), (l_sock, l_tok), reason)
-                    # Immediately try to start the next match
+                    logger.info(f"Lobby requeue: front={w_tok}, back={l_tok} (size={len(lobby)})")
+                    # Notify waiting spectators of their updated queue positions
+                    # (skip positions 1–2, they're about to start the next match)
+                    for pos, (sock, _) in enumerate(lobby, start=1):
+                        if pos <= 2:
+                            continue
+                        try:
+                            wfile = sock.makefile("w")
+                            io_send(wfile, 0, msg=f"INFO You are number {pos-2} in the queue to play")
+                        except Exception:
+                            pass
+                    # kick off next match if ready
                     _try_pair_lobby()
 
                 current_session.start()
@@ -248,40 +254,31 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
             while True:
                 # Accept new connection (blocking)
                 conn, addr = server_sock.accept()
-                print(f"[INFO] Client connected from {addr}")
-                # Read the "TOKEN ..." line byte-by-byte so we don't over-buffer and kill our framing
-                conn.settimeout(_cfg.RECONNECT_HANDSHAKE_TIMEOUT)
-                first_line_bytes = bytearray()
+                logger.info(f"Connection from {addr}")
+                # Framed handshake: read a GAME packet carrying {"token": ...}
                 try:
-                    while len(first_line_bytes) < 64:
-                        ch = conn.recv(1)
-                        if not ch or ch == b"\n":
-                            break
-                        first_line_bytes.extend(ch)
-                    first_line = first_line_bytes.decode(errors="ignore").strip()
+                    br = conn.makefile("rb")
+                    bw = conn.makefile("wb")
+                    ptype, seq, obj = recv_pkt(br)  # handshake frame
+                    # ACK the handshake so client prunes that seq
+                    send_pkt(bw, PacketType.ACK, seq, None)
+                    token_str = obj.get("token") if isinstance(obj, dict) else None
+                    logger.debug("Received framed handshake token: %r", token_str)
                 except Exception:
-                    first_line = ""
-                finally:
-                    conn.settimeout(None)
-                print(f"[DEBUG] Handshake saw: {first_line!r}")
-                token_str = None
-                if first_line.upper().startswith("TOKEN "):
-                    parts = first_line.split(maxsplit=1)
-                    candidate = parts[1] if len(parts) > 1 else None
-                    if candidate:
-                        ctrl = PID_REGISTRY.get(candidate)
-                        if ctrl:
-                            if ctrl.attach_player(candidate, conn):
-                                print("[INFO] Reattached via PID-token")
-                            # Duplicate or failed attach: drop this connection
-                            continue
-                        # Fresh join: remember candidate token for later lobby enqueue
-                        token_str = candidate
-                # Always treat new connections as waiting/spectating clients
+                    token_str = None
+                # Reconnect attempt?
+                if token_str:
+                    ctrl = PID_REGISTRY.get(token_str)
+                    if ctrl:
+                        if ctrl.attach_player(token_str, conn):
+                            logger.info(f"Reattached via PID-token {token_str}")
+                        # don't enqueue as new spectator or pair into play
+                        continue
+                # Always treat fresh connections as waiting/spectating clients
                 lobby.append((conn, token_str))
-                # Inform and debug-log new waiting client
+                # New spectator waiting in lobby
                 pos = len(lobby)
-                print(f"[DEBUG] Client added to lobby with token {token_str!r} (lobby size={pos})")
+                logger.info(f"Lobby update: token {token_str!r} joined (size={pos})")
 
                 # if a game is already in progress, inform the new client:
                 if current_session and current_session.is_alive():

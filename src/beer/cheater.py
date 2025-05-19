@@ -1,4 +1,7 @@
 from collections import deque
+import random
+import time
+from .battleship import BOARD_SIZE
 from .battleship import SHIP_LETTERS
 
 
@@ -21,11 +24,14 @@ class Cheater:
     packet the server gives you, then hands out exactly those coords.
     """
 
-    def __init__(self):
+    def __init__(self, miss_rate: float = 0.0, delay: float = 0.5):
         self._targets = deque()
         self._seeded = False
-        # only fire once per turn
         self._turn_ready = False
+        self._last_rows: list[str] | None = None
+        self._fired: set[str] = set()
+        self.miss_rate = miss_rate
+        self.delay = delay
 
     def feed_grid(self, rows: list[str]) -> None:
         """
@@ -33,6 +39,9 @@ class Cheater:
         The first time you see ships, or whenever you've emptied your old queue,
         this will clear and refill _targets for the new game.
         """
+        # Always store the latest hidden-grid snapshot
+        self._last_rows = rows
+
         if not _is_reveal_grid(rows):
             return
 
@@ -40,6 +49,7 @@ class Cheater:
         if not self._seeded or not self._targets:
             # Clear old targets (important between games)
             self._targets.clear()
+            self._fired.clear()
             for r, line in enumerate(rows):
                 for c, cell in enumerate(line.split()):
                     if cell in _SHIP_CHARS:
@@ -60,6 +70,32 @@ class Cheater:
         if not self._turn_ready:
             return None
         self._turn_ready = False
+
+        # apply optional delay, interruptible
+        try:
+            if self.delay > 0:
+                time.sleep(self.delay)
+        except KeyboardInterrupt:
+            return None
+
+        # inject random misses based on miss_rate
+        if self.miss_rate > 0 and random.random() < self.miss_rate:
+            size = BOARD_SIZE
+            while True:
+                r = random.randrange(size)
+                c = random.randrange(size)
+                coord = f"{chr(ord('A') + r)}{c+1}"
+                if coord not in self._fired:
+                    self._fired.add(coord)
+                    return coord
+
+        # If we've run out but have a snapshot, re-seed
+        if not self._targets and self._last_rows:
+            # reset seed to allow re-fill
+            self._seeded = False
+            self.feed_grid(self._last_rows or [])
         if not self._targets:
             return None
-        return self._targets.popleft()
+        coord = self._targets.popleft()
+        self._fired.add(coord)
+        return coord

@@ -190,7 +190,8 @@ def _recv_loop(
         name = obj.get("name")
         msg_txt = obj.get("msg")
         if verbose >= 0:
-            print(f"[CHAT] {name}: {msg_txt}")
+            # Render chat lines in green
+            print(f"\033[32m[CHAT] {name}: {msg_txt}\033[0m")
 
     def h_end(obj: dict) -> None:
         if "end" in _cfg.QUIET_CATEGORIES:
@@ -254,45 +255,30 @@ def _recv_loop(
                 if _cfg.DEBUG:
                     logger.debug("Recv packet %s", obj)
                 p = obj.get("type")
-                if p in handlers:
+                # don't treat GAME frames of type=="chat" here (handled below)
+                if p and p in handlers and p != "chat":
                     handlers[p](obj)
                 else:
-                    # Fallback: server text (START/INFO/ERR) and raw frames
+                    # Fallback: server START/INFO/ERR/SUNK/YOU/OPPONENT lines
                     msg = obj.get("msg", "")
                     if not msg:
                         continue
-                    # START you: new token assignment
-                    if msg.startswith("START you "):
-                        # Extract token and persist it
-                        parts = msg.split(maxsplit=2)
-                        if len(parts) >= 3:
-                            TOKEN = parts[2]
-                        # We are Player 1
-                        my_slot = 1
-                        print(msg)
-                        continue
-                    # START opp: just display
-                    if msg.startswith("START opp "):
-                        # We are Player 2
-                        my_slot = 2
-                        print(msg)
-                        continue
-                    # Handle unknown-token error silently: reset persistent token, do not display
-                    if msg.startswith("ERR Unknown token "):
-                        # Reset to this process's parent (shell) PID token for fresh join
-                        TOKEN = f"PID{os.getppid()}"
-                        continue
-                    # INFO and other ERR messages shown
+                    # Text we want to show and re-prompt on
                     if (
                         msg.startswith("INFO ")
                         or (msg.startswith("ERR ") and not msg.startswith("ERR Unknown token "))
                         or msg.startswith("[INFO] ")
+                        or msg.startswith("YOU ")
+                        or msg.startswith("OPPONENT ")
+                        or msg.startswith("SUNK ")
                     ):
-                        # Print server INFO/ERR message and immediately reprint prompt
-                        print(f"\r{msg}", flush=True)
-                        # Reprint the input prompt so it's visible immediately
+                        # color sunk notifications red
+                        out = msg
+                        if msg.startswith("SUNK "):
+                            out = f"\033[31m{msg}\033[0m"
+                        print(f"\r{out}", flush=True)
                         _prompt()
-                        # Reset prompt when the shooter should act again
+                        # Reset prompt state when it's your turn
                         if msg.startswith("INFO YOUR TURN") or msg.startswith("INFO Opponent has reconnected"):
                             _prompt_shown = False
                             if cheat_mode and cheater:
@@ -348,6 +334,20 @@ def main() -> None:  # pragma: no cover – CLI entry
         action="store_true",
         help="Cheat mode: auto‐fire every opponent ship cell exactly once",
     )
+    parser.add_argument(
+        "-m",
+        "--miss-rate",
+        type=float,
+        default=0.0,
+        help="Probability (0–1) of injecting random misses when cheating",
+    )
+    parser.add_argument(
+        "-c",
+        "--delay",
+        type=float,
+        default=0.0,
+        help="Delay in seconds between cheat shots",
+    )
     args = parser.parse_args()
 
     # Set the BEER_DEBUG environment variable based on the --debug flag
@@ -370,14 +370,16 @@ def main() -> None:  # pragma: no cover – CLI entry
 # Internal client loop invoked from main
 def _client(s, args, cheat_mode: bool = False):
     addr = (args.host, args.port)
-    # Retry loop: connect or exit
+    # Set up a single framed writer and sequence counter before handshake
+    wfile = s.makefile("w")
+    client_seq = 0
+    # Retry/connect loop
     while True:
         try:
             s.connect(addr)
-            try:
-                s.sendall(f"TOKEN {TOKEN}\n".encode())
-            except Exception:
-                pass
+            # Framed handshake: send our TOKEN inside a GAME frame
+            io_send(wfile, client_seq, PacketType.GAME, obj={"token": TOKEN})
+            client_seq += 1
             print(f"[INFO] Connected to server at {addr}", flush=True)
             break
         except KeyboardInterrupt:
@@ -392,7 +394,7 @@ def _client(s, args, cheat_mode: bool = False):
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         time.sleep(1)
     stop_evt = threading.Event()
-    cheater = Cheater() if cheat_mode else None
+    cheater = Cheater(miss_rate=args.miss_rate, delay=args.delay) if cheat_mode else None
     receiver = threading.Thread(target=_recv_loop, args=(s, stop_evt, _VERBOSE_LEVEL, cheat_mode, cheater), daemon=True)
     receiver.start()
 
@@ -410,9 +412,7 @@ def _client(s, args, cheat_mode: bool = False):
             input_queue.put(line)
     threading.Thread(target=_input_thread, daemon=True).start()
 
-    # Set up framed writer and sequence counter
-    wfile = s.makefile("w")
-    client_seq = 0
+    # Note: wfile and client_seq were initialized above for the handshake
 
     try:
         while True:
@@ -443,9 +443,15 @@ def _client(s, args, cheat_mode: bool = False):
             if user_input is None:
                 break
             text = user_input.strip()
+            # Allow slash-prefixed commands (e.g. /CHAT, /FIRE, /QUIT)
+            if text.startswith("/"):
+                text = text[1:].strip()
             if not text:
                 continue
             if text.upper() == "QUIT":
+                # Tell server we're conceding
+                io_send(wfile, client_seq, PacketType.GAME, msg="QUIT")
+                client_seq += 1
                 print("[INFO] Exiting client per user request.")
                 break
             # Send framed command
