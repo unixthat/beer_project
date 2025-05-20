@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 import sys
 import queue
+import re
 
 from .common import (
     PacketType,
@@ -39,8 +40,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ------------------- PID-token handshake token -------------------
-# Handshake token: default to the parent (shell) PID so it stays constant per terminal
-TOKEN = os.getenv("BEER_TOKEN", f"PID{os.getppid()}")
+# Handshake token: default to the current process PID so it stays unique per client process
+TOKEN = os.getenv("BEER_TOKEN", f"PID{os.getpid()}")
 # Inform user of the token in use
 print(f"[INFO] Using handshake TOKEN='{TOKEN}'")
 
@@ -124,34 +125,46 @@ except ImportError:
     readline = None
 
 
-def _prompt() -> None:
-    """Display the user-input prompt, preserving any typed text."""
-    # Always clear the current line and print a fresh blank prompt
-    sys.stdout.write("\r\033[K>> ")
-    sys.stdout.flush()
-
-
-# Flag that controls whether the main loop has shown the ">> " prompt
+# Guard so we only print the prompt once per server "real" prompt
 _prompt_shown = False
 _spectator_mode = False  # once set, we'll drop any user input
+
+# Client role/turn state (single source of truth from server)
+my_slot: int | None = None       # 1=attacker, 2=defender
+current_turn: int | None = None  # whose turn it currently is
+_reconnect_waiting: bool = False  # True when waiting for opponent to reconnect
+
+def _prompt() -> None:
+    """Display the user-input prompt, preserving any typed text."""
+    # Only print once until reset by a real prompt message
+    sys.stdout.write("\r\033[K>> ")
+    sys.stdout.flush()
+    _prompt_shown = True
 
 
 def _recv_loop(
     sock: socket.socket, stop_evt: threading.Event, verbose: int, cheat_mode: bool, cheater: Cheater
 ) -> None:  # pragma: no cover
-    global _prompt_shown, _spectator_mode
+    global _prompt_shown, _spectator_mode, my_slot, current_turn, _reconnect_waiting
 
     """Continuously print messages from the server (framed packets only)."""
     global TOKEN
     br = sock.makefile("rb")  # binary reader for framed packets
     bw = sock.makefile("wb")  # binary writer for ACK/NAK
-    # Track which player slot we're in (1=you, 2=opponent)
-    my_slot: int | None = None
 
     last_opp: Optional[list[str]] = None
     last_own: Optional[list[str]] = None
 
     # ---------------- Handler helpers ----------------
+
+    def h_role(obj: dict) -> None:
+        global my_slot, _prompt_shown
+        slot_val = obj.get("slot")
+        if isinstance(slot_val, int):
+            my_slot = slot_val
+            if verbose >= 0:
+                print(f"[INFO] You are Player {my_slot}")
+            _prompt_shown = False
 
     def h_spec_grid(obj: dict) -> None:
         if "spec_grid" in _cfg.QUIET_CATEGORIES:
@@ -181,9 +194,11 @@ def _recv_loop(
         result = obj.get("result")
         sunk = obj.get("sunk") or ""
         if verbose >= 0:
+            # Base shot info
             line = f"SHOT {coord} (P{attacker} {result})"
+            # Append sunk info in red if present
             if sunk:
-                line += f" SUNK {sunk}"
+                line += f" \033[31mSUNK {sunk}\033[0m"
             print(line)
 
     def h_chat(obj: dict) -> None:
@@ -219,6 +234,7 @@ def _recv_loop(
             _print_grid(rows)
 
     handlers: Dict[str, Callable[[dict], None]] = {
+        "role": h_role,
         "spec_grid": h_spec_grid,
         "grid": h_grid,
         "shot": h_shot,
@@ -263,31 +279,45 @@ def _recv_loop(
                 else:
                     # Fallback: server START/INFO/ERR/SUNK/YOU/OPPONENT lines
                     msg = obj.get("msg", "")
+                    # Strip ANSI escape codes for matching
+                    clean = re.sub(r"\033\[[0-9;]*m", "", msg)
                     if not msg:
                         continue
                     # Text we want to show and re-prompt on
                     if (
-                        msg.startswith("INFO ")
-                        or (msg.startswith("ERR ") and not msg.startswith("ERR Unknown token "))
-                        or msg.startswith("[INFO] ")
-                        or msg.startswith("YOU ")
-                        or msg.startswith("OPPONENT ")
-                        or msg.startswith("SUNK ")
+                        clean.startswith("INFO ")
+                        or (clean.startswith("ERR ") and not clean.startswith("ERR Unknown token "))
+                        or clean.startswith("[INFO] ")
+                        or clean.startswith("YOU ")
+                        or clean.startswith("OPPONENT ")
+                        or clean.startswith("SUNK ")
                     ):
                         # if the server tells us we're spectating, turn on drop mode
-                        if msg.startswith("INFO You are now spectating"):
+                        if clean.startswith("INFO You are now spectating"):
                             _spectator_mode = True
                         # color sunk notifications red
                         out = msg
-                        if msg.startswith("SUNK "):
-                            out = f"\033[31m{msg}\033[0m"
+                        # color uncolored sunk messages red
+                        if clean.startswith("SUNK ") and not msg.startswith("\033"):
+                            out = f"\033[31m{clean}\033[0m"
                         print(f"\r{out}", flush=True)
-                        _prompt()
-                        # Reset prompt state when it's your turn
-                        if msg.startswith("INFO YOUR TURN") or msg.startswith("INFO Opponent has reconnected"):
-                            _prompt_shown = False
+                        # Track disconnect/reconnect state
+                        if clean.startswith("INFO Opponent disconnected"):
+                            _reconnect_waiting = True
+                        elif clean.startswith("INFO Opponent has reconnected"):
+                            _reconnect_waiting = False
+                        # Prompt attacker after their turn, rejoin, or opponent disconnect/reconnect
+                        if (
+                            clean.startswith("INFO YOUR TURN") or
+                            clean.startswith("INFO You have reconnected") or
+                            clean.startswith("INFO Opponent disconnected") or
+                            clean.startswith("INFO Opponent has reconnected")
+                        ):
+                            # Inform cheater it's now our turn
                             if cheat_mode and cheater:
                                 cheater.notify_turn()
+                            _prompt_shown = False
+                            _prompt()
                         continue
                     # Raw/unrecognized frames at verbose>=1
                     if verbose >= 1 and "raw" not in _cfg.QUIET_CATEGORIES:
@@ -407,14 +437,21 @@ def _client(s, args, cheat_mode: bool = False):
     input_queue = queue.Queue()
 
     def _input_thread():
+        global my_slot, current_turn, _reconnect_waiting
         while not stop_evt.is_set():
+            if _reconnect_waiting:
+                print("Please wait for opponent to reconnect...")
+                time.sleep(1)
+                continue
             try:
                 line = input(">> ")
             except (EOFError, KeyboardInterrupt):
-                # Signal shutdown and unblock main loop
-                stop_evt.set()
-                input_queue.put(None)
                 break
+            # if we know we're not the attacker and it's not our turn, only allow CHAT
+            if my_slot is not None and my_slot != current_turn:
+                if not line.strip().upper().startswith("CHAT "):
+                    print("[WARN] You can only CHAT while you're defending.")
+                    continue
             input_queue.put(line)
 
     threading.Thread(target=_input_thread, daemon=True).start()
@@ -437,6 +474,10 @@ def _client(s, args, cheat_mode: bool = False):
                         continue
                     print("[INFO] All ships fired, exiting cheat-client.")
                     break
+                if args.debug:
+                    print(f"[DEBUG] Firing at {coord}", flush=True)
+                if args.delay > 0:
+                    time.sleep(args.delay)
                 # Send framed FIRE command
                 io_send(wfile, client_seq, PacketType.GAME, msg=f"FIRE {coord}")
                 client_seq += 1

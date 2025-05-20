@@ -104,10 +104,10 @@ def safe_readline(
         return ""
 
 
-def chat_broadcast(writers: list[TextIO], seq: int, idx: int, chat_txt: str, payload: Any) -> int:
+def chat_broadcast(writers: list[TextIO], seq: int, name: str, chat_txt: str, payload: Any) -> int:
     """Send CHAT frames to a list of writers."""
     for w in writers:
-        send(w, seq, PacketType.CHAT, msg=f"[CHAT] P{idx}: {chat_txt}", obj=payload)
+        send(w, seq, PacketType.CHAT, msg=f"[CHAT] {name}: {chat_txt}", obj=payload)
         seq += 1
     return seq
 
@@ -174,12 +174,12 @@ def recv_turn(
                     session.io_seq = chat_broadcast(
                         [session.p1_file_w, session.p2_file_w],
                         session.io_seq,
-                        2,
+                        session.token_p2,
                         cmd.text,
-                        {"name": "P2", "msg": cmd.text},
+                        {"name": session.token_p2, "msg": cmd.text},
                     )
                     # also send to any waiting spectators
-                    session._broadcast(None, {"type": "chat", "name": "P2", "msg": cmd.text})
+                    session._broadcast(None, {"type": "chat", "name": session.token_p2, "msg": cmd.text})
                     continue
                 if isinstance(cmd, QuitCommand):
                     session._conclude(1, reason="concession")
@@ -196,12 +196,12 @@ def recv_turn(
                 session.io_seq = chat_broadcast(
                     [session.p1_file_w, session.p2_file_w],
                     session.io_seq,
-                    1,
+                    session.token_p1,
                     cmd.text,
-                    {"name": "P1", "msg": cmd.text},
+                    {"name": session.token_p1, "msg": cmd.text},
                 )
                 # attacker chat → also to spectators
-                session._broadcast(None, {"type": "chat", "name": "P1", "msg": cmd.text})
+                session._broadcast(None, {"type": "chat", "name": session.token_p1, "msg": cmd.text})
                 continue
             if isinstance(cmd, QuitCommand):
                 return "QUIT"

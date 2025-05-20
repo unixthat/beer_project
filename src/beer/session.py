@@ -166,16 +166,16 @@ class GameSession(threading.Thread):
         """Handshake to start or restart a match: START, placement, initial grids, signal ready."""
         # Emit start event and notify both players
         self._emit(Event(Category.TURN, "start", {"token_p1": self.token_p1, "token_p2": self.token_p2}))
-        # Notify players of new match and tokens
-        self._notify(self.p1_file_w, "INFO New game: you are Player 1")
-        self._notify(self.p2_file_w, "INFO New game: you are Player 2")
-        # Inform both players of their opponent's PID-token
-        self._notify(self.p1_file_w, f"INFO You are now playing a new match against {self.token_p2}")
-        self._notify(self.p2_file_w, f"INFO You are now playing a new match against {self.token_p1}")
+        # Notify players of new match and tokens (display in gold)
+        self._notify(self.p1_file_w, "\033[93mINFO New game: you are Player 1\033[0m")
+        self._notify(self.p2_file_w, "\033[93mINFO New game: you are Player 2\033[0m")
+        # Inform both players of their opponent's PID-token (display in gold)
+        self._notify(self.p1_file_w, f"\033[93mINFO You are now playing a new match against {self.token_p2}\033[0m")
+        self._notify(self.p2_file_w, f"\033[93mINFO You are now playing a new match against {self.token_p1}\033[0m")
 
-        # Legacy START frames for compatibility
-        self._notify(self.p1_file_w, f"START you {self.token_p1}")
-        self._notify(self.p2_file_w, f"START opp {self.token_p2}")
+        # Legacy START frames for compatibility (display in gold)
+        self._notify(self.p1_file_w, f"\033[93mSTART you {self.token_p1}\033[0m")
+        self._notify(self.p2_file_w, f"\033[93mSTART opp {self.token_p2}\033[0m")
 
         # Skip manual placement: randomly place ships for both players
         self.board_p1.place_ships_randomly()
@@ -207,129 +207,40 @@ class GameSession(threading.Thread):
     def run(self) -> None:  # noqa: C901 complexity – fine for server thread
         """Main game-loop executed in its own thread until the match ends."""
         try:
-            # Handshake and placement
+            # 1) Handshake + placement
             self._begin_match()
             current_player = 1
             self.current = current_player
 
             while True:
-                # Send turn prompt
+                # 2) Prompt attacker
                 self._prompt_current_player()
                 self._emit(Event(Category.TURN, "prompt", {"player": current_player}))
 
-                # Receive next framed command, handling disconnects
-                reader = self.p1_file_r.buffer if current_player == 1 else self.p2_file_r.buffer
-                try:
-                    cmd_line = recv_cmd(reader)
-                except Exception:
-                    # Attempt to handle disconnect and possible reconnect
-                    if self._handle_disconnects([current_player]):
+                # 3) Block until we get exactly one Chat/Quit/Fire from either side
+                cmd = self._await_command(current_player)
+                if cmd is None:
+                    # reconnect timed out, or defender quit → end match
                         return
-                    # Resume loop after successful reconnect
-                    continue
 
-                raw = obj["msg"]
-                # Parse the incoming command
-                try:
-                    cmd = parse_command(cmd_line)
-                except CommandParseError as e:
-                    # Invalid command: notify and re-prompt
-                    w = self.p1_file_w if current_player == 1 else self.p2_file_w
-                    self._notify(w, f"ERR {e}")
-                    continue
-
-                # Handle Quit
+                # 4) Attacker quit → concession
                 if isinstance(cmd, QuitCommand):
                     logging.info(f"Player {current_player} conceded – ending match")
                     self.drop_and_deregister(current_player, reason="concession")
                     return
 
-                # Handle Chat
-                if isinstance(cmd, ChatCommand):
-                    # Broadcast to the two players
-                    self.io_seq = chat_broadcast(
-                        [self.p1_file_w, self.p2_file_w],
-                        self.io_seq,
-                        current_player,
-                        cmd.text,
-                        {"name": f"P{current_player}", "msg": cmd.text},
-                    )
-                    # Also deliver as a CHAT frame to all spectators
-                    self._broadcast(
-                        None,
-                        {"type": "chat", "name": f"P{current_player}", "msg": cmd.text},
-                    )
-                    # Server-side event routing
-                    self._emit(Event(Category.CHAT, "line", {"player": current_player, "msg": cmd.text}))
-                    continue
-
-                # Handle Fire
+                # 5) Attacker fire → execute shot (includes duplicate‐shot guard,
+                #    reconnect checks, chat already handled, and grid refreshes)
                 row, col = cmd.row, cmd.col
-                # Prevent duplicate shots: check if this player already fired here
-                key = (row, col)
-                if key in self._fired[current_player]:
-                    w = self.p1_file_w if current_player == 1 else self.p2_file_w
-                    self._notify(w, f"ERR Already fired at {format_coord(row, col)}, choose another")
-                    continue
-                self._fired[current_player].add(key)
-                # Resolve shot
+                self._execute_shot(current_player, row, col)
+
+                # 6) Victory?
                 defender_board = self.board_p2 if current_player == 1 else self.board_p1
-                defender_w = self.p2_file_w if current_player == 1 else self.p1_file_w
-                attacker_w = self.p1_file_w if current_player == 1 else self.p2_file_w
-                result, sunk_name = defender_board.fire_at(row, col)
-                # Track shot count for winner stats
-                self._shots[current_player] += 1
-
-                coord_txt = format_coord(row, col)
-                # Build messages
-                if result == "hit":
-                    attacker_msg = f"YOU HIT at {coord_txt}"
-                    defender_msg = f"OPPONENT HIT your ship at {coord_txt}"
-                else:
-                    attacker_msg = f"YOU MISSED at {coord_txt}"
-                    defender_msg = f"OPPONENT MISSED at {coord_txt}"
-                # Send feedback
-                io_send(attacker_w, self.io_seq, PacketType.GAME, msg=attacker_msg)
-                self.io_seq += 1
-                io_send(defender_w, self.io_seq, PacketType.GAME, msg=defender_msg)
-                self.io_seq += 1
-                # Report sunk ships
-                if sunk_name:
-                    io_send(attacker_w, self.io_seq, PacketType.GAME, msg=f"SUNK {sunk_name}")
-                    self.io_seq += 1
-                    io_send(defender_w, self.io_seq, PacketType.GAME, msg=f"SUNK {sunk_name}")
-                    self.io_seq += 1
-
-                # Event routing to spectators (shot events)
-                self._broadcast(
-                    {"player": current_player, "coord": coord_txt, "result": result, "sunk": sunk_name},
-                    PacketType.GAME,
-                )
-
-                # Send updated boards to both players
-                ok1, ok2, self.io_seq = refresh_views(
-                    self.p1_file_w,
-                    self.p2_file_w,
-                    self.io_seq,
-                    self.board_p1,
-                    self.board_p2,
-                )
-                # Spectators get full dual-board every full turn (2 half-turns)
-                self._half_turn_counter += 1
-                if self._half_turn_counter % 2 == 0:
-                    rows_p1 = grid_rows(self.board_p1, reveal=True)
-                    rows_p2 = grid_rows(self.board_p2, reveal=True)
-                    self._broadcast(
-                        None,
-                        {"type": "spec_grid", "rows_p1": rows_p1, "rows_p2": rows_p2},
-                    )
-
-                # Game over
                 if defender_board.all_ships_sunk():
                     self._conclude(current_player, reason="fleet destroyed")
                     return
 
-                # Next turn
+                # 7) Swap turns
                 current_player = 2 if current_player == 1 else 1
                 self.current = current_player
         finally:
@@ -357,7 +268,9 @@ class GameSession(threading.Thread):
 
         # After rebinding, push the current boards to the re-attached player.
         self._sync_state(slot)
-        # Don't prompt here; we'll get re-prompted in the next run() iteration
+        # If it's their turn now, immediately re-prompt them to fire
+        if slot == self.current:
+            self._prompt_current_player()
 
     # ------------------------------------------------------------
     # helper: push fresh boards to a just-reconnected player
@@ -419,10 +332,6 @@ class GameSession(threading.Thread):
         self.winner = winner
         self.win_reason = reason
         self.win_shots = shots  # type: ignore[attr-defined]
-        # Spectators no longer receive free-text finale; emit line to server logs only.
-        result_line = f"[GAME] Match finished – P{winner} wins by {reason} in {shots} shots."
-        logging.info(result_line)
-
         # Emit end-of-game event (EventRouter will broadcast exactly one end-frame per client)
         self._emit(Event(Category.TURN, "end", {"winner": winner, "reason": reason, "shots": shots}))
 
@@ -452,11 +361,13 @@ class GameSession(threading.Thread):
         Return True if the match concluded and run should exit, False otherwise.
         """
         for idx in dropped_slots:
-            logging.info(f"Player {idx} disconnected – awaiting reconnect")
+            # Log disconnections in red
+            logging.info(f"\033[91mPlayer {idx} disconnected – awaiting reconnect\033[0m")
         failed: list[int] = []
         for idx in dropped_slots:
             if self.recon.wait(idx):
-                logging.info(f"Player {idx} reconnected – resuming match")
+                # Log reconnections in red
+                logging.info(f"\033[91mPlayer {idx} reconnected – resuming match\033[0m")
                 # pull the socket *after* wait() so INFO messages were sent
                 new_sock = self.recon.take_new_socket(idx)
                 self._rebind_slot(idx, new_sock)
@@ -521,6 +432,7 @@ class GameSession(threading.Thread):
         Send the canonical 'Your turn' frame to whichever slot is stored in self.current.
         """
         w = self.p1_file_w if self.current == 1 else self.p2_file_w
+        # Display turn prompts in gold
         self._notify(w, "INFO YOUR TURN – FIRE <coord> or QUIT")
 
     # ------------------------------------------------------------
@@ -535,6 +447,178 @@ class GameSession(threading.Thread):
                 break
             if ptype in (PacketType.ACK, PacketType.NAK):
                 handle_control_frame(data_writer_buf, ptype, seq)
+
+    def _await_command(self, attacker_idx: int):
+        """
+        Wait for exactly one of:
+          - FireCommand from the attacker (returns FireCommand)
+          - QuitCommand from the attacker (returns QuitCommand)
+          - Defender QuitCommand or attacker reconnect timeout (returns None)
+        In the meantime, handles:
+          • out-of-turn ChatCommand → broadcasts and re-prompts
+          • duplicate shots → ERR + re-prompt
+          • out-of-turn FireCommand → ERR + re-prompt
+          • unexpected disconnect on attacker → _handle_disconnects
+        """
+        import select
+
+        while True:
+            # 1) If attacker reconnected, rebind & sync (sends INFO messages)
+            self._rebind_if_needed(attacker_idx)
+
+            # 2) Grab current sockets, buffers, writers
+            if attacker_idx == 1:
+                att_sock, att_buf, att_w = self.p1_sock, self.p1_file_r.buffer, self.p1_file_w
+                def_sock, def_buf, def_w, def_slot = self.p2_sock, self.p2_file_r.buffer, self.p2_file_w, 2
+            else:
+                att_sock, att_buf, att_w = self.p2_sock, self.p2_file_r.buffer, self.p2_file_w
+                def_sock, def_buf, def_w, def_slot = self.p1_sock, self.p1_file_r.buffer, self.p1_file_w, 1
+
+            # 3) Wait for either socket to become readable
+            ready, _, _ = select.select([att_sock, def_sock], [], [])
+            for sock in ready:
+                # pick the right buffer + writer + slot
+                if sock is att_sock:
+                    buf, w, slot = att_buf, att_w, attacker_idx
+                else:
+                    buf, w, slot = def_buf, def_w, def_slot
+
+                # 4) Try to unpack one framed packet
+                try:
+                    ptype, seq, obj = unpack(buf)
+                except Exception:
+                    # defender disconnected? handle reconnect early
+                    if sock is def_sock and self._handle_disconnects([def_slot]):
+                        return None
+                    # attacker disconnected? handle reconnect or end match
+                    if sock is att_sock and self._handle_disconnects([attacker_idx]):
+                        return None
+                    continue
+
+                # only GAME/<msg> frames
+                if ptype != PacketType.GAME or not isinstance(obj, dict) or "msg" not in obj:
+                    continue
+                raw = obj["msg"]
+
+                # 5) Parse into a command object
+                try:
+                    cmd = parse_command(raw)
+                except CommandParseError as e:
+                    # bad syntax → ERR to the sender; only re-prompt if the attacker mis-typed
+                    self._notify(w, f"ERR {e}")
+                    if sock is att_sock:
+                        self._prompt_current_player()
+                    continue
+
+                # 6) Out-of-turn chat
+                if isinstance(cmd, ChatCommand):
+                    # Use player PID token instead of generic slot name
+                    name = self.token_p1 if slot == 1 else self.token_p2
+                    self.io_seq = chat_broadcast(
+                        [self.p1_file_w, self.p2_file_w], self.io_seq,
+                        name, cmd.text, {"name": name, "msg": cmd.text},
+                    )
+                    self._broadcast(None, {"type": "chat", "name": name, "msg": cmd.text})
+                    self._emit(Event(Category.CHAT, "line", {"player": slot, "msg": cmd.text}))
+                    self._prompt_current_player()
+                    break
+
+                # 7) Quit from either side
+                if isinstance(cmd, QuitCommand):
+                    if sock is att_sock:
+                        # attacker is conceding
+                        return cmd
+                    # defender is conceding → attacker wins
+                    self.drop_and_deregister(def_slot, reason="concession")
+                    return None
+
+                # 8) FireCommand
+                if isinstance(cmd, FireCommand):
+                    # out-of-turn fire
+                    if sock is not att_sock:
+                        self._notify(w, "ERR Not your turn – wait for prompt")
+                        break
+                    # duplicate shot?
+                    coord = (cmd.row, cmd.col)
+                    if coord in self._fired[attacker_idx]:
+                        self._notify(w, f"ERR Already fired at {format_coord(cmd.row, cmd.col)}")
+                        self._prompt_current_player()
+                        break
+                    # record and deliver to run()
+                    self._fired[attacker_idx].add(coord)
+                    return cmd
+                # else: ignore non-command frames
+            # end for ready sockets → loop back
+        # end while
+
+    # -------------------- shot execution --------------------
+    def _execute_shot(self, current_player: int, row: int, col: int) -> None:
+        """
+        Executes a shot: sends feedback to both clients, handles defender reconnect
+        immediately if their socket is closed, then broadcasts shot, updates boards.
+        """
+        # Determine attacker/defender
+        defender_board = self.board_p2 if current_player == 1 else self.board_p1
+        defender_w = self.p2_file_w if current_player == 1 else self.p1_file_w
+        attacker_w = self.p1_file_w if current_player == 1 else self.p2_file_w
+
+        # Fire on the board
+        result, sunk_name = defender_board.fire_at(row, col)
+        self._shots[current_player] += 1
+        coord_txt = format_coord(row, col)
+
+        # Send hit/miss to attacker & defender
+        you_text = f"YOU {'HIT' if result=='hit' else 'MISSED'} at {coord_txt}"
+        opp_text = f"OPPONENT {'HIT' if result=='hit' else 'MISSED'} at {coord_txt}"
+        io_send(attacker_w, self.io_seq, PacketType.GAME, msg=you_text)
+        self.io_seq += 1
+        ok = io_send(defender_w, self.io_seq, PacketType.GAME, msg=opp_text)
+        self.io_seq += 1
+
+        # Defender dropped? do reconnect + single-board logic
+        if not ok:
+            # If reconnect failed (match ended), bail out
+            if self._handle_disconnects([2 if current_player == 1 else 1]):
+                return
+            # Defender rejoined successfully: skip the normal refresh_views
+            # (they already got the boards via _sync_state)
+            reconnected = True
+        else:
+            reconnected = False
+
+        # Sunk notification (display in red)
+        if sunk_name:
+            # Color the SUNK message red
+            sunk_msg = f"SUNK {sunk_name}"
+            red_msg = f"\033[91m{sunk_msg}\033[0m"
+            io_send(attacker_w, self.io_seq, PacketType.GAME, msg=red_msg)
+            self.io_seq += 1
+            io_send(defender_w, self.io_seq, PacketType.GAME, msg=red_msg)
+            self.io_seq += 1
+
+        # Broadcast shot to spectators
+        self._broadcast(None, {
+            "type": "shot",
+            "player": current_player,
+            "coord": coord_txt,
+            "result": result,
+            "sunk": sunk_name,
+        })
+
+        # If defender has just rejoined, avoid sending a second grid snapshot
+        if reconnected:
+            return
+
+        # Otherwise do the normal board refresh
+        ok1, ok2, self.io_seq = refresh_views(
+            self.p1_file_w, self.p2_file_w, self.io_seq, self.board_p1, self.board_p2
+        )
+        # Send a full dual‐board update every two half‐turns
+        self._half_turn_counter += 1
+        if self._half_turn_counter % 2 == 0:
+            rows_p1 = grid_rows(self.board_p1, reveal=True)
+            rows_p2 = grid_rows(self.board_p2, reveal=True)
+            self._broadcast(None, {"type": "spec_grid", "rows_p1": rows_p1, "rows_p2": rows_p2})
 
 
 # End of GameSession module

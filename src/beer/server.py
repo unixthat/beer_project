@@ -15,7 +15,7 @@ import time
 import logging
 import argparse
 import signal
-from typing import Optional, Any
+from typing import Optional, Any, Dict, Callable
 import itertools
 
 from .session import GameSession
@@ -211,10 +211,11 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
                     # report with PID tokens
                     winning_tok = sess.token_p1 if winner == 1 else sess.token_p2
                     losing_tok = sess.token_p2 if winner == 1 else sess.token_p1
-                    logger.info(f"Match completed – {winning_tok} won by {reason}")
+                    # Match completion log in gold
+                    logger.info(f"\033[93mMatch completed – {winning_tok} won by {reason}\033[0m")
                     # broadcast concession to waiting spectators
                     if reason == "concession":
-                        lobby_broadcast(f"INFO Player {losing_tok} has forfeited – match over", None)
+                        lobby_broadcast(f"\033[93mINFO Player {losing_tok} has forfeited – match over\033[0m", None)
                         logger.info(f"{losing_tok} concedes – match over")
                     # Notify current spectators of the match result
                     shots = getattr(sess, "win_shots", None) or 0
@@ -222,8 +223,23 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
                     losing_tok = sess.token_p2 if winner == 1 else sess.token_p1
                     result_msg = f"INFO {winning_tok} BEAT {losing_tok} IN {shots} SHOTS"
                     # Broadcast result to all waiting spectators
-                    lobby_broadcast(result_msg, None)
-                    logger.info(f"Spectators notified: {result_msg}")
+                    lobby_broadcast(f"\033[93m{result_msg}\033[0m", None)
+                    # Log the full lobby queue as a vertical list (entries indented)
+                    tokens = [tok for _, tok in lobby]
+                    queue_str = "\n".join("  " + tok for tok in tokens)
+                    logger.info(f"Lobby queue:\n{queue_str}")
+                    # Notify waiting spectators of their updated queue positions
+                    # (skip positions 1–2, they're about to start the next match)
+                    for pos, (sock, _) in enumerate(lobby, start=1):
+                        if pos <= 2:
+                            continue
+                        try:
+                            wfile = sock.makefile("w")
+                            io_send(wfile, 0, msg=f"\033[93mINFO You are number {pos-2} in the queue to play\033[0m")
+                        except Exception:
+                            pass
+                    # Spectator notification log in green
+                    logger.info(f"\033[32mSpectators notified: {result_msg}\033[0m")
                     # Re-queue both players back into lobby
                     if winner == 1:
                         w_sock, w_tok = sess.p1_sock, sess.token_p1
@@ -232,17 +248,6 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
                         w_sock, w_tok = sess.p2_sock, sess.token_p2
                         l_sock, l_tok = sess.p1_sock, sess.token_p1
                     requeue_players(lobby, (w_sock, w_tok), (l_sock, l_tok), reason)
-                    logger.info(f"Lobby requeue: front={w_tok}, back={l_tok} (size={len(lobby)})")
-                    # Notify waiting spectators of their updated queue positions
-                    # (skip positions 1–2, they're about to start the next match)
-                    for pos, (sock, _) in enumerate(lobby, start=1):
-                        if pos <= 2:
-                            continue
-                        try:
-                            wfile = sock.makefile("w")
-                            io_send(wfile, 0, msg=f"INFO You are number {pos-2} in the queue to play")
-                        except Exception:
-                            pass
                     # kick off next match if ready
                     _try_pair_lobby()
 
@@ -271,9 +276,10 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
                     # only attempt reattach if we found a controller
                     if ctrl:
                         if ctrl.attach_player(token_str, conn):
-                            logger.info(f"Reattached via PID-token {token_str}")
+                            # Reattachment log in red
+                            logger.info(f"\033[91mReattached via PID-token {token_str}\033[0m")
                         # don't enqueue as new spectator or pair into play
-                        continue
+                            continue
 
                 # Always treat fresh connections as waiting/spectating clients
                 lobby.append((conn, token_str))
@@ -285,9 +291,9 @@ def main() -> None:  # pragma: no cover – side-effect entrypoint
                 if current_session and current_session.is_alive():
                     wfile = conn.makefile("w")
                     # Notify spectator status
-                    io_send(wfile, 0, msg="INFO You are now spectating")
+                    io_send(wfile, 0, msg="\033[93mINFO You are now spectating\033[0m")
                     # Notify queue position
-                    io_send(wfile, 0, msg=f"INFO You are currently number {pos} in the queue to play")
+                    io_send(wfile, 0, msg=f"\033[93mINFO You are currently number {pos} in the queue to play\033[0m")
                     # Optionally ship them the current board immediately
                     rows_p1 = grid_rows(current_session.board_p1, reveal=True)
                     rows_p2 = grid_rows(current_session.board_p2, reveal=True)

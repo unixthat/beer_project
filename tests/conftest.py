@@ -26,11 +26,12 @@ class TestClient:
         """Read BEER protocol frames until the token appears in a decoded message."""
         self.sock.settimeout(timeout)
         buf = ""
+        reader = self.sock.makefile("rb")
         try:
             while True:
-                ptype, seq, obj = recv_pkt(self.sock.makefile("rb"))
+                ptype, seq, obj = recv_pkt(reader)
                 msg = obj.get("msg", "") if isinstance(obj, dict) else ""
-                buf += msg
+                buf += msg + "\n"
                 if token.upper() in msg.upper():
                     break
         except socket.timeout:

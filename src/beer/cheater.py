@@ -87,13 +87,6 @@ class Cheater:
             return None
         self._turn_ready = False
 
-        # apply optional delay, interruptible
-        try:
-            if self.delay > 0:
-                time.sleep(self.delay)
-        except KeyboardInterrupt:
-            return None
-
         # inject random misses based on miss_rate
         if self.miss_rate > 0 and random.random() < self.miss_rate:
             size = BOARD_SIZE

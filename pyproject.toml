@@ -21,6 +21,7 @@ dependencies = []
 beer-server = "beer.server:main"
 beer-client = "beer.client:main"
 beer-bot = "beer.bot:main"
+beer-replay = "beer.replay_attack:main"
 
 [tool.black]
 line-length = 120

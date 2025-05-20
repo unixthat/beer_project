@@ -82,7 +82,7 @@ class EventRouter:
         if ev.type != "line":
             return
         # log chat on server; clients already get it directly from GameSession
-        logger.info(f"[CHAT] P{ev.payload['player']}: {ev.payload['msg']}")
+        logger.info(f"\033[32m[CHAT] P{ev.payload['player']}: {ev.payload['msg']}\033[0m")
 
     def _handle_system(self, ev: Event) -> None:
         # Currently no dedicated SYSTEM packets.

@@ -40,4 +40,4 @@ class EventRouter:
         if event.type in self.handlers:
             self.handlers[event.type](event)
         else:
-            print(f"No handler for event type: {event.type}")
+            print(f"No handler for event type: {event.type}")       
