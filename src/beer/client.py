@@ -40,8 +40,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ------------------- PID-token handshake token -------------------
-# Handshake token: default to the current process PID so it stays unique per client process
-TOKEN = os.getenv("BEER_TOKEN", f"PID{os.getpid()}")
+# Handshake token: default to the parent (shell) PID so it stays constant per terminal
+TOKEN = os.getenv("BEER_TOKEN", f"PID{os.getppid()}")
 # Inform user of the token in use
 print(f"[INFO] Using handshake TOKEN='{TOKEN}'")
 
@@ -295,6 +295,8 @@ def _recv_loop(
                         # if the server tells us we're spectating, turn on drop mode
                         if clean.startswith("INFO You are now spectating"):
                             _spectator_mode = True
+                        if clean.startswith("INFO You have reconnected"):
+                            _spectator_mode = False
                         # color sunk notifications red
                         out = msg
                         # color uncolored sunk messages red
@@ -304,7 +306,7 @@ def _recv_loop(
                         # Track disconnect/reconnect state
                         if clean.startswith("INFO Opponent disconnected"):
                             _reconnect_waiting = True
-                        elif clean.startswith("INFO Opponent has reconnected"):
+                        elif clean.startswith("INFO Opponent has reconnected") or clean.startswith("INFO You have reconnected"):
                             _reconnect_waiting = False
                         # Prompt attacker after their turn, rejoin, or opponent disconnect/reconnect
                         if (
